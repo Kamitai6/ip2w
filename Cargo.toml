@@ -4,7 +4,7 @@ name         = "ip2w"
 version      = "0.1.0"
 
 [dependencies]
-esp-hal = { version = "~1.0", features = ["defmt", "esp32s3", "unstable"] }
+esp-hal = { version = "~1.0", features = ["defmt", "esp32s3", "psram", "unstable"] }
 esp-rtos = { version = "0.2", features = ["defmt", "esp-alloc", "esp-radio", "esp32s3"] }
 esp-bootloader-esp-idf = { version = "0.4", features = ["defmt", "esp32s3"] }
 esp-alloc = { version = "0.9", features = ["defmt"] }
@@ -18,7 +18,7 @@ esp-radio = { version = "0.17", features = [
   "unstable",
   "wifi",
 ] }
-# esp-display-interface-spi-dma = { version = "0.2", features = ["esp32s3"] }
+esp-display-interface-spi-dma = { version = "0.2", features = ["esp32s3"], path = "./modules/esp-display-interface-spi-dma"}
 esp-bsp = {version = "0.4", path = "./modules/esp-bsp"}
 
 embedded-io = { version = "0.7", features = ["defmt"] }
@@ -26,6 +26,7 @@ embedded-graphics = "0.8"
 
 critical-section = "1.2"
 defmt = "1.0"
+shared-bus = "0.3"
 heapless = "0.9"
 libm = {version = "0.2"}
 mipidsi = "0.9"

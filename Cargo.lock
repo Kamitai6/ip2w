@@ -89,6 +89,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "byte-slice-cast"
+version = "1.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7575182f7272186991736b70173b0ea045398f984bf5ebbb3804736ce1330c9d"
+
+[[package]]
 name = "bytemuck"
 version = "1.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -259,6 +265,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "display-interface"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7ba2aab1ef3793e6f7804162debb5ac5edb93b3d650fbcc5aeb72fcd0e6c03a0"
+
+[[package]]
+name = "display-interface-spi"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f86b9ec30048b1955da2038fcc3c017f419ab21bb0001879d16c0a3749dc6b7a"
+dependencies = [
+ "byte-slice-cast",
+ "display-interface",
+ "embedded-hal 1.0.0",
+ "embedded-hal-async",
+]
+
+[[package]]
 name = "document-features"
 version = "0.2.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -364,6 +388,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e9d2e857f87ac832df68fa498d18ddc679175cf3d2e4aa893988e5601baf9438"
 dependencies = [
  "nb 1.1.0",
+]
+
+[[package]]
+name = "embedded-dma"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "994f7e5b5cb23521c22304927195f236813053eb9c065dd2226a32ba64695446"
+dependencies = [
+ "stable_deref_trait",
 ]
 
 [[package]]
@@ -563,6 +596,20 @@ dependencies = [
  "serde",
  "serde_yaml",
  "somni-expr",
+]
+
+[[package]]
+name = "esp-display-interface-spi-dma"
+version = "0.2.0"
+dependencies = [
+ "byte-slice-cast",
+ "display-interface",
+ "display-interface-spi",
+ "embedded-dma",
+ "embedded-graphics",
+ "embedded-hal 1.0.0",
+ "esp-hal",
+ "num-traits",
 ]
 
 [[package]]
@@ -1048,6 +1095,7 @@ dependencies = [
  "esp-backtrace",
  "esp-bootloader-esp-idf",
  "esp-bsp",
+ "esp-display-interface-spi-dma",
  "esp-hal",
  "esp-println",
  "esp-radio",
@@ -1055,6 +1103,7 @@ dependencies = [
  "heapless 0.9.2",
  "libm",
  "mipidsi",
+ "shared-bus",
  "smoltcp",
 ]
 
@@ -1459,6 +1508,16 @@ dependencies = [
  "ryu",
  "serde",
  "unsafe-libyaml",
+]
+
+[[package]]
+name = "shared-bus"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c6b8d3f0e34309c22ca4a9a27d24fa493e31573485f3493802b75b9d706756a6"
+dependencies = [
+ "embedded-hal 0.2.7",
+ "nb 1.1.0",
 ]
 
 [[package]]
