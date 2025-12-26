@@ -149,54 +149,47 @@ fn main() -> ! {
 
     // let imu_transform: Matrix3<f32> = Matrix3::from_diagonal(&Vector3::new(-1.0, 1.0, -1.0));
 
+    let lcd_spi = lcd_spi!(peripherals);
+    let di = lcd_display_interface!(peripherals, lcd_spi);
+    let mut display = lcd_display!(peripherals, di, &mut delay).unwrap();
 
-    // esp32では、RX/TX別々にDMAを割り当てるのではなく、それぞれ設定できるだけで同じチャンネルとして扱うらしい
-    // let dma_channel = peripherals.DMA_CH0;
-    // let (rx, tx) = dma_channel.split();
-    // rx.set_priority(DmaPriority::Priority0);
-    // tx.set_priority(DmaPriority::Priority0);
+    // // DMAなしのSPI
+    // let spi = Spi::new(
+    //     peripherals.SPI2,
+    //     SpiCfg::default()
+    //         .with_frequency(Rate::from_mhz(40))
+    //         .with_mode(Mode::_0),
+    // )
+    // .unwrap()
+    // .with_sck(peripherals.GPIO15)
+    // .with_mosi(peripherals.GPIO21);
 
-    // let lcd_spi = lcd_spi!(peripherals);
-    // let di = lcd_display_interface!(peripherals, lcd_spi);
-    // let mut display = lcd_display!(peripherals, di, &mut delay).unwrap();
-
-    // DMAなしのSPI
-    let spi = Spi::new(
-        peripherals.SPI2,
-        SpiCfg::default()
-            .with_frequency(Rate::from_mhz(40))
-            .with_mode(Mode::_0),
-    )
-    .unwrap()
-    .with_sck(peripherals.GPIO15)
-    .with_mosi(peripherals.GPIO21);
-
-    let cs = Output::new(peripherals.GPIO14, Level::High, OutputConfig::default());
-    let dc = Output::new(peripherals.GPIO42, Level::Low, OutputConfig::default());
-    let mut rst = Output::new(peripherals.GPIO48, Level::High, OutputConfig::default());
+    // let cs = Output::new(peripherals.GPIO14, Level::High, OutputConfig::default());
+    // let dc = Output::new(peripherals.GPIO42, Level::Low, OutputConfig::default());
+    // let mut rst = Output::new(peripherals.GPIO48, Level::High, OutputConfig::default());
 
     // SpiBusをSpiDeviceに変換
-    let spi_device = ExclusiveDevice::new_no_delay(spi, cs).unwrap();
+    // let spi_device = ExclusiveDevice::new_no_delay(spi, cs).unwrap();
 
-    const DMA_BUFFER_SIZE: usize = 4096;
-    static mut BUFFER1: [u32; DMA_BUFFER_SIZE / 4] = [0u32; DMA_BUFFER_SIZE / 4];
-    let buffer = unsafe {
-        core::slice::from_raw_parts_mut(
-            core::ptr::addr_of_mut!(BUFFER1) as *mut u8,
-            DMA_BUFFER_SIZE,
-        )
-    };
+    // const DMA_BUFFER_SIZE: usize = 4096;
+    // static mut BUFFER1: [u32; DMA_BUFFER_SIZE / 4] = [0u32; DMA_BUFFER_SIZE / 4];
+    // let buffer = unsafe {
+    //     core::slice::from_raw_parts_mut(
+    //         core::ptr::addr_of_mut!(BUFFER1) as *mut u8,
+    //         DMA_BUFFER_SIZE,
+    //     )
+    // };
 
-    let di = mipidsi::interface::SpiInterface::new(spi_device, dc, buffer);
+    // let di = mipidsi::interface::SpiInterface::new(spi_device, dc, buffer);
 
-    let mut display = mipidsi::Builder::new(mipidsi::models::GC9107, di)
-    .reset_pin(rst)
-    .display_size(128, 128) //GC9107 default (128, 160)
-    .display_offset(0, 32) // 160 - 128 = 32
-    .color_order(mipidsi::options::ColorOrder::Bgr)
-    // .invert_colors(mipidsi::options::ColorInversion::Inverted)
-    .init(&mut delay)
-    .unwrap();
+    // let mut display = mipidsi::Builder::new(mipidsi::models::GC9107, di)
+    // .reset_pin(rst)
+    // .display_size(128, 128) //GC9107 default (128, 160)
+    // .display_offset(0, 32) // 160 - 128 = 32
+    // .color_order(mipidsi::options::ColorOrder::Bgr)
+    // .invert_colors(mipidsi::options::ColorInversion::Normal)
+    // .init(&mut delay)
+    // .unwrap();
 
     display.clear(Rgb565::RED).unwrap();
     delay.delay_millis(1000);

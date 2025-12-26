@@ -1,7 +1,9 @@
-pub const LCD_H_RES: usize = 128;
-pub const LCD_V_RES: usize = 128;
+pub const LCD_SIZE_W: usize = 128;
+pub const LCD_SIZE_H: usize = 128;
+pub const LCD_OFFSET_W: usize = 0;
+pub const LCD_OFFSET_H: usize = 32;
 pub const LCD_BYTES_PER_PIXEL: usize = 2;
-pub const LCD_MEMORY_SIZE: usize = LCD_H_RES * LCD_V_RES * LCD_BYTES_PER_PIXEL;
+pub const LCD_MEMORY_SIZE: usize = LCD_SIZE_W * LCD_SIZE_H * LCD_BYTES_PER_PIXEL;
 
 #[macro_export]
 macro_rules! lcd_spi {
@@ -10,8 +12,7 @@ macro_rules! lcd_spi {
             $peripherals,
             $peripherals.DMA_CH0,
             $peripherals.GPIO15, // SCK
-            $peripherals.GPIO21, // MOSI
-            $peripherals.GPIO14   // CS
+            $peripherals.GPIO21 // MOSI
         )
     };
 }
@@ -32,7 +33,7 @@ macro_rules! lcd_backlight_init {
 #[macro_export]
 macro_rules! lcd_display_interface {
     ($peripherals:ident, $spi:expr) => {
-        ::esp_bsp::shared_lcd_display_interface!($peripherals, $spi, $peripherals.GPIO42) //DC
+        ::esp_bsp::shared_lcd_display_interface!($peripherals, $spi, $peripherals.GPIO42, $peripherals.GPIO14) //DC, CS
     };
 }
 
@@ -42,13 +43,15 @@ macro_rules! lcd_display {
         ::esp_bsp::shared_lcd_display!(
             $di,
             mipidsi::models::GC9107,
-            $crate::LCD_H_RES as u16,
-            $crate::LCD_V_RES as u16,
+            ::esp_bsp::lcd_reset_pin!($peripherals),
+            $crate::LCD_SIZE_W as u16,
+            $crate::LCD_SIZE_H as u16,
+            $crate::LCD_OFFSET_W as u16,
+            $crate::LCD_OFFSET_H as u16,
             mipidsi::options::Orientation::new(),
             mipidsi::options::ColorOrder::Bgr,
-            ::esp_bsp::lcd_reset_pin!($peripherals)
+            mipidsi::options::ColorInversion::Normal
         )
-        .invert_colors(mipidsi::options::ColorInversion::Inverted)
         .init($delay)
     };
 }

@@ -595,6 +595,7 @@ name = "esp-display-interface-spi-dma"
 version = "0.2.0"
 dependencies = [
  "byte-slice-cast",
+ "defmt 1.0.1",
  "embedded-dma",
  "embedded-graphics",
  "embedded-hal 1.0.0",

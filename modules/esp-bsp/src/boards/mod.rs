@@ -65,7 +65,7 @@ pub use m5stack_fire::{LCD_MEMORY_SIZE, LCD_H_RES, LCD_V_RES, LCD_BYTES_PER_PIXE
 #[macro_use]
 pub mod m5atom_s3r;
 #[cfg(feature = "m5atom-s3r")]
-pub use m5atom_s3r::{LCD_MEMORY_SIZE, LCD_H_RES, LCD_V_RES, LCD_BYTES_PER_PIXEL};
+pub use m5atom_s3r::{LCD_MEMORY_SIZE, LCD_SIZE_W, LCD_SIZE_H, LCD_OFFSET_W, LCD_OFFSET_H, LCD_BYTES_PER_PIXEL};
 
 #[cfg(feature = "waveshare-esp32-c6-lcd-1-47")]
 #[macro_use]

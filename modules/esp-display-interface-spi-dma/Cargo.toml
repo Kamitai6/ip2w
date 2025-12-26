@@ -20,6 +20,7 @@ embedded-hal = { version = "1.0" }
 embedded-dma = "0.2.0"
 num-traits = { version = "0.2", default-features = false }
 esp-hal = { version = "1.0", default-features = false }
+defmt = "1.0"
 
 [features]
 default = []
