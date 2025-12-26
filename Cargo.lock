@@ -591,20 +591,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "esp-display-interface-spi-dma"
-version = "0.2.0"
-dependencies = [
- "byte-slice-cast",
- "defmt 1.0.1",
- "embedded-dma",
- "embedded-graphics",
- "embedded-hal 1.0.0",
- "esp-hal",
- "mipidsi",
- "num-traits",
-]
-
-[[package]]
 name = "esp-hal"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -795,6 +781,20 @@ dependencies = [
  "esp-radio-rtos-driver",
  "esp-sync",
  "portable-atomic",
+]
+
+[[package]]
+name = "esp-spidma-interface"
+version = "0.3.0"
+dependencies = [
+ "byte-slice-cast",
+ "defmt 1.0.1",
+ "embedded-dma",
+ "embedded-graphics",
+ "embedded-hal 1.0.0",
+ "esp-hal",
+ "mipidsi",
+ "num-traits",
 ]
 
 [[package]]
@@ -1089,11 +1089,11 @@ dependencies = [
  "esp-backtrace",
  "esp-bootloader-esp-idf",
  "esp-bsp",
- "esp-display-interface-spi-dma",
  "esp-hal",
  "esp-println",
  "esp-radio",
  "esp-rtos",
+ "esp-spidma-interface",
  "heapless 0.9.2",
  "libm",
  "mipidsi",

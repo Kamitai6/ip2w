@@ -19,7 +19,7 @@ macro_rules! shared_lcd_display_interface {
     ($peripherals:ident, $spi:expr, $dc_pin:expr, $cs_pin:expr) => {{
         let lcd_dc = ::esp_hal::gpio::Output::new($dc_pin, Level::Low, ::esp_hal::gpio::OutputConfig::default());
         let lcd_cs = ::esp_hal::gpio::Output::new($cs_pin, Level::High, ::esp_hal::gpio::OutputConfig::default());
-        display_interface_spi_dma::SPIInterface::new($spi, lcd_dc, lcd_cs)
+        spidma_interface::SPIInterface::new($spi, lcd_dc, lcd_cs)
     }};
 }
 

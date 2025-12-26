@@ -30,7 +30,7 @@ use esp_hal::{
     handler,
     ram,
 };
-use esp_display_interface_spi_dma::display_interface_spi_dma;
+use esp_spidma_interface::spidma_interface;
 use esp_bsp::{lcd_spi, lcd_backlight_init, lcd_display_interface, lcd_display, i2c_init, BoardType, DisplayConfig};
 use embedded_graphics::{
     prelude::{IntoStorage, RgbColor, Point, DrawTarget},
@@ -81,8 +81,6 @@ type Lp5562Sensor<I2C> = Sensor<I2C>;
 )]
 #[main]
 fn main() -> ! {
-    // generator version: 1.1.0
-
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
     // esp_alloc::psram_allocator!(peripherals.PSRAM, esp_hal::psram);
@@ -101,95 +99,30 @@ fn main() -> ! {
     let i2c = i2c_init!(peripherals);
     let i2c_ref_cell = RefCell::new(i2c);
 
-    // fn scan_i2c<I2C: eh_I2c>(i2c: &mut I2C) {
-    //     info!("Scanning I2C bus...");
-    //     for addr in 0x08..0x78 {
-    //         // 空のwriteでACKを確認
-    //         if i2c.write(addr, &[]).is_ok() {
-    //             info!("Found device at 0x{:02X}", addr);
-    //         }
-    //     }
-    //     info!("Scan complete");
-    // }
-    // let mut i2c_scan = I2cRefCellDevice::new(&i2c_ref_cell);
-    // scan_i2c(&mut i2c_scan);
-
     // LP5562 
     let mut lp5562 = Lp5562Sensor::new(
         I2cRefCellDevice::new(&i2c_ref_cell),
         0x30,
     );
     let _ = lp5562.write(&[0x0D, 0xFF]);
-    info!("Reset OK");
     let _ = lp5562.write(&[0x0F, 0xFF]); // White
-    info!("Current OK");
     let _ = lp5562.write(&[0x0E, 0xFF]); // White
-    info!("PWM OK");
     let _ = lp5562.write(&[0x00, 0x40]);
-    info!("Chip EN");
-    delay.delay_millis(500);
+    delay.delay_millis(10);
     let _ = lp5562.write(&[0x08, 0x01]);
-    info!("Config OK");
     let _ = lp5562.write(&[0x70, 0x00]);
-    info!("LED_MAP OK");
-
-    // info!("Reset: 0x{:02X}", lp5562.read_reg(0x0D).unwrap_or(0));
-    // info!("Current: 0x{:02X}", lp5562.read_reg(0x0F).unwrap_or(0));
-    // info!("PWM: 0x{:02X}", lp5562.read_reg(0x0E).unwrap_or(0));
-    // info!("Chip: 0x{:02X}", lp5562.read_reg(0x00).unwrap_or(0));
-    // info!("Config: 0x{:02X}", lp5562.read_reg(0x08).unwrap_or(0));
-    // info!("LED_MAP: 0x{:02X}", lp5562.read_reg(0x70).unwrap_or(0));
 
     // Initialize IMU
     // let mut imu = Mpu6886::new(i2c_bus.acquire_i2c());
     // imu.init(&mut delay::FreeRtos).unwrap();
+    // let imu_transform: Matrix3<f32> = Matrix3::from_diagonal(&Vector3::new(-1.0, 1.0, -1.0));
 
     // // Initialize Atom Motion motor driver
     // let mut motion = atom_motion::AtomMotion::new(i2c_bus.acquire_i2c());
 
-    // let imu_transform: Matrix3<f32> = Matrix3::from_diagonal(&Vector3::new(-1.0, 1.0, -1.0));
-
     let lcd_spi = lcd_spi!(peripherals);
     let di = lcd_display_interface!(peripherals, lcd_spi);
     let mut display = lcd_display!(peripherals, di, &mut delay).unwrap();
-
-    // // DMAなしのSPI
-    // let spi = Spi::new(
-    //     peripherals.SPI2,
-    //     SpiCfg::default()
-    //         .with_frequency(Rate::from_mhz(40))
-    //         .with_mode(Mode::_0),
-    // )
-    // .unwrap()
-    // .with_sck(peripherals.GPIO15)
-    // .with_mosi(peripherals.GPIO21);
-
-    // let cs = Output::new(peripherals.GPIO14, Level::High, OutputConfig::default());
-    // let dc = Output::new(peripherals.GPIO42, Level::Low, OutputConfig::default());
-    // let mut rst = Output::new(peripherals.GPIO48, Level::High, OutputConfig::default());
-
-    // SpiBusをSpiDeviceに変換
-    // let spi_device = ExclusiveDevice::new_no_delay(spi, cs).unwrap();
-
-    // const DMA_BUFFER_SIZE: usize = 4096;
-    // static mut BUFFER1: [u32; DMA_BUFFER_SIZE / 4] = [0u32; DMA_BUFFER_SIZE / 4];
-    // let buffer = unsafe {
-    //     core::slice::from_raw_parts_mut(
-    //         core::ptr::addr_of_mut!(BUFFER1) as *mut u8,
-    //         DMA_BUFFER_SIZE,
-    //     )
-    // };
-
-    // let di = mipidsi::interface::SpiInterface::new(spi_device, dc, buffer);
-
-    // let mut display = mipidsi::Builder::new(mipidsi::models::GC9107, di)
-    // .reset_pin(rst)
-    // .display_size(128, 128) //GC9107 default (128, 160)
-    // .display_offset(0, 32) // 160 - 128 = 32
-    // .color_order(mipidsi::options::ColorOrder::Bgr)
-    // .invert_colors(mipidsi::options::ColorInversion::Normal)
-    // .init(&mut delay)
-    // .unwrap();
 
     display.clear(Rgb565::RED).unwrap();
     delay.delay_millis(1000);
@@ -223,8 +156,6 @@ fn main() -> ! {
         let delay_start = Instant::now();
         while delay_start.elapsed() < Duration::from_millis(500) {}
     }
-
-    // for inspiration have a look at the examples at https://github.com/esp-rs/esp-hal/tree/esp-hal-v~1.0/examples
 }
 
 // #[handler]

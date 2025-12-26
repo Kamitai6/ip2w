@@ -1,11 +1,11 @@
 //! DMA SPI interface for display drivers
 
-use core::cell::RefCell;
-use core::ptr::addr_of_mut;
-use defmt::info;
+use core::{
+    cell::RefCell, 
+    ptr::addr_of_mut, 
+    slice::from_raw_parts_mut
+};
 
-// use byte_slice_cast::AsByteSlice;
-// use display_interface::{DataFormat, DisplayError, WriteOnlyDataCommand};
 use esp_hal::{
     dma::{DmaDescriptor, DmaTxBuf},
     gpio::Output,
@@ -16,16 +16,13 @@ use mipidsi::interface::Interface;
 const DMA_BUFFER_SIZE: usize = 4096;
 const DMA_CHUNK_SIZE: usize = 4092;
 
-#[link_section = ".dram1.bss"]
 static mut BUFFER1: [u32; DMA_BUFFER_SIZE / 4] = [0u32; DMA_BUFFER_SIZE / 4];
-#[link_section = ".dram1.bss"]
 static mut BUFFER2: [u32; DMA_BUFFER_SIZE / 4] = [0u32; DMA_BUFFER_SIZE / 4];
 
 const DESCRIPTOR_COUNT: usize = (DMA_BUFFER_SIZE + DMA_CHUNK_SIZE - 1) / DMA_CHUNK_SIZE;
 
-#[link_section = ".dram1.bss"]
-static mut DESCRIPTORS: [DmaDescriptor; DESCRIPTOR_COUNT] = 
-    [DmaDescriptor::EMPTY; DESCRIPTOR_COUNT];
+static mut DESCRIPTORS1: [DmaDescriptor; DESCRIPTOR_COUNT] = [DmaDescriptor::EMPTY; DESCRIPTOR_COUNT];
+static mut DESCRIPTORS2: [DmaDescriptor; DESCRIPTOR_COUNT] = [DmaDescriptor::EMPTY; DESCRIPTOR_COUNT];
 
 type SpiDma<'d> = esp_hal::spi::master::SpiDma<'d, esp_hal::Blocking>;
 
@@ -80,28 +77,26 @@ impl<'d> SPIInterface<'d> {
     }
 
     fn single_transfer(&self, send_buffer: &'static mut [u8], len: usize) {
-        let buffer = DmaTxBuf::new(descriptors(), &mut send_buffer[..len]).unwrap();
+        let buffer = DmaTxBuf::new(descriptors1(), &mut send_buffer[..len]).unwrap();
         let transfer = self.spi.borrow_mut().take().unwrap().write(len, buffer).unwrap();
         let (reclaimed_spi, _) = transfer.wait();
         self.spi.replace(Some(reclaimed_spi));
     }
 
-    /// ダブルバッファリングを使った転送（元の iter_transfer を基に）
+    // ダブルバッファリングを使った転送（元の iter_transfer を基に）
     fn iter_transfer<const N: usize>(
         &self,
         iter: &mut impl Iterator<Item = [u8; N]>,
     ) {
-        info!("iter_transfer start");
         let mut spi = Some(self.spi.borrow_mut().take().unwrap());
         let mut current_buffer = 0;
         let mut transfer: Option<SpiDmaTransfer<'d, esp_hal::Blocking, DmaTxBuf>> = None;
-        let mut chunk_count = 0;
 
         loop {
-            let buffer = if current_buffer == 0 {
-                dma_buffer1()
+            let (buffer, descs) = if current_buffer == 0 {
+                (dma_buffer1(), descriptors1())
             } else {
-                dma_buffer2()
+                (dma_buffer2(), descriptors2())
             };
 
             // バッファにピクセルを詰める
@@ -120,22 +115,14 @@ impl<'d> SPIInterface<'d> {
                 }
             }
 
-            // 前の転送を待つ（ダブルバッファリング）
+            // 前の転送を待つ（常に待つ）
             if let Some(t) = transfer.take() {
-                if idx > 0 {
-                    let (reclaimed_spi, _) = t.wait();
-                    spi = Some(reclaimed_spi);
-                } else {
-                    // 最後の転送が実行中、後で回収するため保存
-                    self.transfer.replace(Some(t));
-                }
+                let (reclaimed_spi, _) = t.wait();
+                spi = Some(reclaimed_spi);
             }
 
             if idx > 0 {
-                chunk_count += 1;
-                info!("Chunk {}: {} bytes, data: {:02X} {:02X} {:02X} {:02X}", 
-                        chunk_count, idx, buffer[0], buffer[1], buffer[2], buffer[3]);
-                let mut dma_buffer = DmaTxBuf::new(descriptors(), &mut buffer[..idx]).unwrap();
+                let mut dma_buffer = DmaTxBuf::new(descs, &mut buffer[..idx]).unwrap();
                 dma_buffer.set_length(idx);
                 transfer = Some(spi.take().unwrap().write(idx, dma_buffer).unwrap());
                 current_buffer = (current_buffer + 1) % 2;
@@ -144,11 +131,12 @@ impl<'d> SPIInterface<'d> {
             }
         }
 
-        // SPI を戻す（転送中でなければ）
-        info!("iter_transfer done, {} chunks", chunk_count);
-        if let Some(s) = spi {
-            self.spi.replace(Some(s));
+        // 最後の転送を待つ
+        if let Some(t) = transfer.take() {
+            let (reclaimed_spi, _) = t.wait();
+            spi = Some(reclaimed_spi);
         }
+        self.spi.replace(spi);
     }
 }
 
@@ -157,26 +145,19 @@ impl Interface for SPIInterface<'_> {
     type Error = DmaError;
 
     fn send_command(&mut self, command: u8, args: &[u8]) -> Result<(), Self::Error> {
-        info!("send_command: 0x{:02X}, args len: {}", command, args.len());
-
         self.wait_for_transfer();
         self.cs_low();
 
-        // DC = Low でコマンド送信
         self.dc.set_low();
         let buffer = dma_buffer1();
         buffer[0] = command;
         self.single_transfer(buffer, 1);
 
-        info!("command sent");
-
-        // DC = High で引数送信
         if !args.is_empty() {
             self.dc.set_high();
             let buffer = dma_buffer1();
             buffer[..args.len()].copy_from_slice(args);
             self.single_transfer(buffer, args.len());
-            info!("args sent");
         }
 
         self.cs_high();
@@ -187,8 +168,6 @@ impl Interface for SPIInterface<'_> {
         &mut self,
         pixels: impl IntoIterator<Item = [Self::Word; N]>,
     ) -> Result<(), Self::Error> {
-        info!("send_pixels N={}", N);
-
         self.wait_for_transfer();
         self.cs_low();
         self.dc.set_high();
@@ -197,7 +176,6 @@ impl Interface for SPIInterface<'_> {
         self.iter_transfer::<N>(&mut iter);
 
         self.cs_high();
-        info!("send_pixels done");
         Ok(())
     }
 
@@ -206,8 +184,6 @@ impl Interface for SPIInterface<'_> {
         pixel: [Self::Word; N],
         count: u32,
     ) -> Result<(), Self::Error> {
-        info!("send_repeated_pixel N={}, count={}", N, count);
-
         self.wait_for_transfer();
         self.cs_low();
         self.dc.set_high();
@@ -217,29 +193,26 @@ impl Interface for SPIInterface<'_> {
         self.iter_transfer::<N>(&mut iter);
 
         self.cs_high();
-        info!("send_repeated_pixel done");
         Ok(())
     }
 }
 
-fn descriptors() -> &'static mut [DmaDescriptor] {
-    unsafe { &mut *addr_of_mut!(DESCRIPTORS) }
+fn descriptors1() -> &'static mut [DmaDescriptor] {
+    unsafe { &mut *addr_of_mut!(DESCRIPTORS1) }
+}
+
+fn descriptors2() -> &'static mut [DmaDescriptor] {
+    unsafe { &mut *addr_of_mut!(DESCRIPTORS2) }
 }
 
 fn dma_buffer1() -> &'static mut [u8] {
     unsafe {
-        core::slice::from_raw_parts_mut(
-            addr_of_mut!(BUFFER1) as *mut u8,
-            DMA_BUFFER_SIZE,
-        )
+        from_raw_parts_mut(addr_of_mut!(BUFFER1) as *mut u8, DMA_BUFFER_SIZE)
     }
 }
 
 fn dma_buffer2() -> &'static mut [u8] {
     unsafe {
-        core::slice::from_raw_parts_mut(
-            addr_of_mut!(BUFFER2) as *mut u8,
-            DMA_BUFFER_SIZE,
-        )
+        from_raw_parts_mut(addr_of_mut!(BUFFER2) as *mut u8, DMA_BUFFER_SIZE)
     }
 }
