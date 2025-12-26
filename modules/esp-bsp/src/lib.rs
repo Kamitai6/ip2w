@@ -1,12 +1,10 @@
 #![no_std]
 
-pub mod prelude;
 pub mod shared;
-
 
 #[macro_use]
 pub mod boards;
-
+pub use boards::*;
 
 pub enum BoardType {
     ESP32C3LcdKit,

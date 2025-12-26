@@ -33,6 +33,7 @@ esp32-s3-box = []
 esp32-s3-box-3 = []
 esp32-s3-usb-otg = []
 m5stack-cores3 = []
+m5atom-s3r = []
 
 # Custom boards are in concept stage and does not work
 custom-board = []

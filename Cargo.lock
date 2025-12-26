@@ -265,24 +265,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "display-interface"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7ba2aab1ef3793e6f7804162debb5ac5edb93b3d650fbcc5aeb72fcd0e6c03a0"
-
-[[package]]
-name = "display-interface-spi"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f86b9ec30048b1955da2038fcc3c017f419ab21bb0001879d16c0a3749dc6b7a"
-dependencies = [
- "byte-slice-cast",
- "display-interface",
- "embedded-hal 1.0.0",
- "embedded-hal-async",
-]
-
-[[package]]
 name = "document-features"
 version = "0.2.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -603,12 +585,11 @@ name = "esp-display-interface-spi-dma"
 version = "0.2.0"
 dependencies = [
  "byte-slice-cast",
- "display-interface",
- "display-interface-spi",
  "embedded-dma",
  "embedded-graphics",
  "embedded-hal 1.0.0",
  "esp-hal",
+ "mipidsi",
  "num-traits",
 ]
 

@@ -12,6 +12,16 @@ use esp_hal::{
 };
 
 const DMA_BUFFER_SIZE: usize = 4096;
+const DMA_CHUNK_SIZE: usize = 4092;
+
+static mut BUFFER1: [u32; DMA_BUFFER_SIZE / 4] = [0u32; DMA_BUFFER_SIZE / 4];
+static mut BUFFER2: [u32; DMA_BUFFER_SIZE / 4] = [0u32; DMA_BUFFER_SIZE / 4];
+
+const DESCRIPTOR_COUNT: usize = (DMA_BUFFER_SIZE + DMA_CHUNK_SIZE - 1) / DMA_CHUNK_SIZE;
+
+static mut DESCRIPTORS: [DmaDescriptor; DESCRIPTOR_COUNT] = 
+    [DmaDescriptor::EMPTY; DESCRIPTOR_COUNT];
+
 type SpiDma<'d> = esp_hal::spi::master::SpiDma<'d, esp_hal::Blocking>;
 
 /// SPI display interface.
@@ -224,17 +234,24 @@ impl<'d> WriteOnlyDataCommand for SPIInterface<'d> {
     }
 }
 
-fn descriptors() -> &'static mut [DmaDescriptor; 8 * 3] {
-    static mut DESCRIPTORS: [DmaDescriptor; 8 * 3] = [DmaDescriptor::EMPTY; 8 * 3];
+fn descriptors() -> &'static mut [DmaDescriptor] {
     unsafe { &mut *addr_of_mut!(DESCRIPTORS) }
 }
 
-fn dma_buffer1() -> &'static mut [u8; DMA_BUFFER_SIZE] {
-    static mut BUFFER: [u8; DMA_BUFFER_SIZE] = [0u8; DMA_BUFFER_SIZE];
-    unsafe { &mut *addr_of_mut!(BUFFER) }
+fn dma_buffer1() -> &'static mut [u8] {
+    unsafe {
+        core::slice::from_raw_parts_mut(
+            addr_of_mut!(BUFFER1) as *mut u8,
+            DMA_BUFFER_SIZE,
+        )
+    }
 }
 
-fn dma_buffer2() -> &'static mut [u8; DMA_BUFFER_SIZE] {
-    static mut BUFFER: [u8; DMA_BUFFER_SIZE] = [0u8; DMA_BUFFER_SIZE];
-    unsafe { &mut *addr_of_mut!(BUFFER) }
+fn dma_buffer2() -> &'static mut [u8] {
+    unsafe {
+        core::slice::from_raw_parts_mut(
+            addr_of_mut!(BUFFER2) as *mut u8,
+            DMA_BUFFER_SIZE,
+        )
+    }
 }
