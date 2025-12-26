@@ -17,9 +17,9 @@ macro_rules! shared_lcd_spi {
 
 #[macro_export]
 macro_rules! shared_lcd_display_interface {
-    ($peripherals:ident, $memory_size:expr, $spi:expr, $dc_pin:expr) => {{
+    ($peripherals:ident, $spi:expr, $dc_pin:expr) => {{
         let lcd_dc = ::esp_hal::gpio::Output::new($dc_pin, Level::Low, ::esp_hal::gpio::OutputConfig::default());
-        display_interface_spi_dma::new_no_cs($memory_size, $spi, lcd_dc)
+        display_interface_spi_dma::SPIInterface::new_no_cs($spi, lcd_dc)
     }};
 }
 

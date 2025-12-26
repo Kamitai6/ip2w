@@ -21,12 +21,13 @@ esp-radio = { version = "0.17", features = [
 esp-display-interface-spi-dma = { version = "0.2", features = ["esp32s3"], path = "./modules/esp-display-interface-spi-dma"}
 esp-bsp = {version = "0.4", features = ["m5atom-s3r"], path = "./modules/esp-bsp"}
 
+embedded-hal = "1.0"
 embedded-io = { version = "0.7", features = ["defmt"] }
 embedded-graphics = "0.8"
+embedded-hal-bus = "0.3"
 
 critical-section = "1.2"
 defmt = "1.0"
-shared-bus = "0.3"
 heapless = "0.9"
 libm = {version = "0.2"}
 mipidsi = "0.9"

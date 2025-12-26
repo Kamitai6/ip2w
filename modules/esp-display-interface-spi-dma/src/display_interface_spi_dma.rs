@@ -3,13 +3,14 @@
 use core::cell::RefCell;
 use core::ptr::addr_of_mut;
 
-use byte_slice_cast::AsByteSlice;
-use display_interface::{DataFormat, DisplayError, WriteOnlyDataCommand};
+// use byte_slice_cast::AsByteSlice;
+// use display_interface::{DataFormat, DisplayError, WriteOnlyDataCommand};
 use esp_hal::{
     dma::{DmaDescriptor, DmaTxBuf},
     gpio::Output,
     spi::master::SpiDmaTransfer,
 };
+use mipidsi::interface::Interface;
 
 const DMA_BUFFER_SIZE: usize = 4096;
 const DMA_CHUNK_SIZE: usize = 4092;
@@ -24,22 +25,21 @@ static mut DESCRIPTORS: [DmaDescriptor; DESCRIPTOR_COUNT] =
 
 type SpiDma<'d> = esp_hal::spi::master::SpiDma<'d, esp_hal::Blocking>;
 
-/// SPI display interface.
-///
-/// This combines the SPI peripheral and a data/command as well as a chip-select pin
+/// DMA SPI interface error
+#[derive(Debug, Clone, Copy)]
+pub struct DmaError;
+
+/// SPI display interface with DMA support
 pub struct SPIInterface<'d> {
-    avg_data_len_hint: usize,
     spi: RefCell<Option<SpiDma<'d>>>,
     transfer: RefCell<Option<SpiDmaTransfer<'d, esp_hal::Blocking, DmaTxBuf>>>,
     dc: Output<'d>,
     cs: Option<Output<'d>>,
 }
 
-#[allow(unused)]
 impl<'d> SPIInterface<'d> {
-    pub fn new(avg_data_len_hint: usize, spi: SpiDma<'d>, dc: Output<'d>, cs: Output<'d>) -> Self {
+    pub fn new(spi: SpiDma<'d>, dc: Output<'d>, cs: Output<'d>) -> Self {
         Self {
-            avg_data_len_hint,
             spi: RefCell::new(Some(spi)),
             transfer: RefCell::new(None),
             dc,
@@ -47,127 +47,86 @@ impl<'d> SPIInterface<'d> {
         }
     }
 
-    fn send_u8(&mut self, words: DataFormat<'_>) -> Result<(), DisplayError> {
-        if let Some(transfer) = self.transfer.take() {
+    pub fn new_no_cs(spi: SpiDma<'d>, dc: Output<'d>) -> Self {
+        Self {
+            spi: RefCell::new(Some(spi)),
+            transfer: RefCell::new(None),
+            dc,
+            cs: None,
+        }
+    }
+
+    fn wait_for_transfer(&self) {
+        if let Some(transfer) = self.transfer.borrow_mut().take() {
             let (reclaimed_spi, _) = transfer.wait();
             self.spi.replace(Some(reclaimed_spi));
         }
-
-        match words {
-            DataFormat::U8(slice) => {
-                use byte_slice_cast::*;
-
-                let send_buffer = dma_buffer1();
-                send_buffer[..slice.len()].copy_from_slice(slice.as_byte_slice());
-
-                self.single_transfer(&mut send_buffer[..slice.len()]);
-            }
-            DataFormat::U16(slice) => {
-                use byte_slice_cast::*;
-
-                let send_buffer = dma_buffer1();
-                send_buffer[..slice.len() * 2].copy_from_slice(slice.as_byte_slice());
-
-                self.single_transfer(&mut send_buffer[..slice.len() * 2]);
-            }
-            DataFormat::U16LE(slice) => {
-                use byte_slice_cast::*;
-                for v in slice.as_mut() {
-                    *v = v.to_le();
-                }
-
-                let send_buffer = dma_buffer1();
-                send_buffer[..slice.len() * 2].copy_from_slice(slice.as_byte_slice());
-
-                self.single_transfer(&mut send_buffer[..slice.len() * 2]);
-            }
-            DataFormat::U16BE(slice) => {
-                use byte_slice_cast::*;
-                for v in slice.as_mut() {
-                    *v = v.to_be();
-                }
-
-                let send_buffer = dma_buffer1();
-                send_buffer[..slice.len() * 2].copy_from_slice(slice.as_byte_slice());
-
-                self.single_transfer(&mut send_buffer[..slice.len() * 2]);
-            }
-            DataFormat::U8Iter(iter) => {
-                self.iter_transfer(iter, |v| v.to_be_bytes());
-            }
-            DataFormat::U16LEIter(iter) => {
-                self.iter_transfer(iter, |v| v.to_le_bytes());
-            }
-            DataFormat::U16BEIter(iter) => {
-                self.iter_transfer(iter, |v| v.to_be_bytes());
-            }
-            _ => {
-                return Err(DisplayError::DataFormatNotImplemented);
-            }
-        }
-        Ok(())
     }
 
-    fn single_transfer(&mut self, send_buffer: &'static mut [u8]) {
-        let mut buffer = DmaTxBuf::new(descriptors(), send_buffer).unwrap();
-        let transfer = self.spi.take().unwrap().write(0_usize, buffer).unwrap();
+    fn cs_low(&mut self) {
+        if let Some(cs) = self.cs.as_mut() {
+            cs.set_low();
+        }
+    }
+
+    fn cs_high(&mut self) {
+        if let Some(cs) = self.cs.as_mut() {
+            cs.set_high();
+        }
+    }
+
+    fn single_transfer(&self, send_buffer: &'static mut [u8], len: usize) {
+        let buffer = DmaTxBuf::new(descriptors(), &mut send_buffer[..len]).unwrap();
+        let transfer = self.spi.borrow_mut().take().unwrap().write(0_usize, buffer).unwrap();
         let (reclaimed_spi, _) = transfer.wait();
         self.spi.replace(Some(reclaimed_spi));
     }
 
-    fn iter_transfer<WORD>(
-        &mut self,
-        iter: &mut dyn Iterator<Item = WORD>,
-        convert: fn(WORD) -> <WORD as num_traits::ToBytes>::Bytes,
-    ) where
-        WORD: num_traits::int::PrimInt + num_traits::ToBytes,
-    {
-        let mut desired_chunk_sized =
-            self.avg_data_len_hint - ((self.avg_data_len_hint / DMA_BUFFER_SIZE) * DMA_BUFFER_SIZE);
-        let mut spi = Some(self.spi.take().unwrap());
+    /// ダブルバッファリングを使った転送（元の iter_transfer を基に）
+    fn iter_transfer<const N: usize>(
+        &self,
+        iter: &mut impl Iterator<Item = [u8; N]>,
+    ) {
+        let mut spi = Some(self.spi.borrow_mut().take().unwrap());
         let mut current_buffer = 0;
         let mut transfer: Option<SpiDmaTransfer<'d, esp_hal::Blocking, DmaTxBuf>> = None;
+
         loop {
             let buffer = if current_buffer == 0 {
-                &mut dma_buffer1()[..]
+                dma_buffer1()
             } else {
-                &mut dma_buffer2()[..]
+                dma_buffer2()
             };
+
+            // バッファにピクセルを詰める
             let mut idx = 0;
             loop {
-                let b = iter.next();
-
-                match b {
-                    Some(b) => {
-                        let b = convert(b);
-                        let b = b.as_byte_slice();
-                        buffer[idx + 0] = b[0];
-                        if b.len() == 2 {
-                            buffer[idx + 1] = b[1];
-                        }
-                        idx += b.len();
+                match iter.next() {
+                    Some(pixel) => {
+                        buffer[idx..idx + N].copy_from_slice(&pixel);
+                        idx += N;
                     }
                     None => break,
                 }
 
-                if idx >= usize::min(desired_chunk_sized, DMA_BUFFER_SIZE) {
+                if idx + N > DMA_BUFFER_SIZE {
                     break;
                 }
             }
-            desired_chunk_sized = DMA_BUFFER_SIZE;
 
-            if let Some(transfer) = transfer {
+            // 前の転送を待つ（ダブルバッファリング）
+            if let Some(t) = transfer.take() {
                 if idx > 0 {
-                    let (reclaimed_spi, relaimed_buffer) = transfer.wait();
+                    let (reclaimed_spi, _) = t.wait();
                     spi = Some(reclaimed_spi);
                 } else {
-                    // last transaction inflight
-                    self.transfer.replace(Some(transfer));
+                    // 最後の転送が実行中、後で回収するため保存
+                    self.transfer.replace(Some(t));
                 }
             }
 
             if idx > 0 {
-                let mut dma_buffer = DmaTxBuf::new(descriptors(), buffer).unwrap();
+                let mut dma_buffer = DmaTxBuf::new(descriptors(), &mut buffer[..idx]).unwrap();
                 dma_buffer.set_length(idx);
                 transfer = Some(spi.take().unwrap().write(0_usize, dma_buffer).unwrap());
                 current_buffer = (current_buffer + 1) % 2;
@@ -175,62 +134,70 @@ impl<'d> SPIInterface<'d> {
                 break;
             }
         }
-    }
-}
 
-pub fn new_no_cs<'d>(
-    avg_data_len_hint: usize,
-    spi: SpiDma<'d>,
-    dc: Output<'d>,
-) -> SPIInterface<'d> {
-    SPIInterface {
-        avg_data_len_hint,
-        spi: RefCell::new(Some(spi)),
-        transfer: RefCell::new(None),
-        dc,
-        cs: None,
-    }
-}
-
-impl<'d> WriteOnlyDataCommand for SPIInterface<'d> {
-    fn send_commands(&mut self, cmds: DataFormat<'_>) -> Result<(), DisplayError> {
-        // Assert chip select pin
-        if let Some(cs) = self.cs.as_mut() {
-            cs.set_low();
+        // SPI を戻す（転送中でなければ）
+        if let Some(s) = spi {
+            self.spi.replace(Some(s));
         }
+    }
+}
 
-        // 1 = data, 0 = command
+impl Interface for SPIInterface<'_> {
+    type Word = u8;
+    type Error = DmaError;
+
+    fn send_command(&mut self, command: u8, args: &[u8]) -> Result<(), Self::Error> {
+        self.wait_for_transfer();
+        self.cs_low();
+
+        // DC = Low でコマンド送信
         self.dc.set_low();
+        let buffer = dma_buffer1();
+        buffer[0] = command;
+        self.single_transfer(buffer, 1);
 
-        // Send words over SPI
-        let res = self.send_u8(cmds);
-
-        // Deassert chip select pin
-        if let Some(cs) = self.cs.as_mut() {
-            cs.set_high();
+        // DC = High で引数送信
+        if !args.is_empty() {
+            self.dc.set_high();
+            let buffer = dma_buffer1();
+            buffer[..args.len()].copy_from_slice(args);
+            self.single_transfer(buffer, args.len());
         }
 
-        res
+        self.cs_high();
+        Ok(())
     }
 
-    fn send_data(&mut self, buf: DataFormat<'_>) -> Result<(), DisplayError> {
-        // Assert chip select pin
-        if let Some(cs) = self.cs.as_mut() {
-            cs.set_low();
-        }
-
-        // 1 = data, 0 = command
+    fn send_pixels<const N: usize>(
+        &mut self,
+        pixels: impl IntoIterator<Item = [Self::Word; N]>,
+    ) -> Result<(), Self::Error> {
+        self.wait_for_transfer();
+        self.cs_low();
         self.dc.set_high();
 
-        // Send words over SPI
-        let res = self.send_u8(buf);
+        let mut iter = pixels.into_iter();
+        self.iter_transfer::<N>(&mut iter);
 
-        // Deassert chip select pin
-        if let Some(cs) = self.cs.as_mut() {
-            cs.set_high();
-        }
+        self.cs_high();
+        Ok(())
+    }
 
-        res
+    fn send_repeated_pixel<const N: usize>(
+        &mut self,
+        pixel: [Self::Word; N],
+        count: u32,
+    ) -> Result<(), Self::Error> {
+        self.wait_for_transfer();
+        self.cs_low();
+        self.dc.set_high();
+
+        // repeat イテレータを使って iter_transfer を再利用
+        let mut iter = core::iter::repeat(pixel).take(count as usize);
+        self.iter_transfer::<N>(&mut iter);
+
+        self.cs_high();
+        Ok(())
     }
 }
 
