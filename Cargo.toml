@@ -27,6 +27,7 @@ embedded-graphics = "0.8"
 embedded-hal-bus = "0.3"
 
 atom = {version = "0.1", path = "./modules/atom"}
+control = {version = "0.1", path = "./modules/control"}
 critical-section = "1.2"
 defmt = "1.0"
 heapless = "0.9"

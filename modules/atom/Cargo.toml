@@ -1,13 +1,7 @@
 [package]
 name    = "atom"
 version = "0.1.0"
-authors = [
-    "Juraj Michálek <juraj.michalek@espressif.com>"
-]
-edition     = "2024"
-description = "Rust Bare Metal Board Support Packages for ESP32 related boards with focus on Embassy Async"
-repository  = "https://github.com/georgik/esp-bsp-rs"
-license     = "MIT OR Apache-2.0"
+edition = "2024"
 
 [dependencies]
 embedded-hal = "1.0"

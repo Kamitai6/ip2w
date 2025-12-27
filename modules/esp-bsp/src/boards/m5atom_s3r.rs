@@ -65,7 +65,7 @@ macro_rules! i2c_init {
         ::esp_hal::i2c::master::I2c::new(
             $peripherals.I2C0, 
             ::esp_hal::i2c::master::Config::default()
-                .with_frequency(::esp_hal::time::Rate::from_khz(100))
+                .with_frequency(::esp_hal::time::Rate::from_khz(400))
             ).unwrap()
                 .with_sda($peripherals.GPIO45)
                 .with_scl($peripherals.GPIO0)

@@ -112,35 +112,6 @@ impl<I2C: I2c> Lp5562<I2C> {
         self.write_reg(reg, value)
     }
 
-    /// Set RGB color (PWM values)
-    pub fn set_rgb(&mut self, r: u8, g: u8, b: u8) -> Result<(), I2C::Error> {
-        self.set_pwm(Channel::Red, r)?;
-        self.set_pwm(Channel::Green, g)?;
-        self.set_pwm(Channel::Blue, b)?;
-        Ok(())
-    }
-
-    /// Set RGBW color (PWM values)
-    pub fn set_rgbw(&mut self, r: u8, g: u8, b: u8, w: u8) -> Result<(), I2C::Error> {
-        self.set_rgb(r, g, b)?;
-        self.set_pwm(Channel::White, w)?;
-        Ok(())
-    }
-
-    /// Turn off all LEDs
-    pub fn off(&mut self) -> Result<(), I2C::Error> {
-        self.set_rgbw(0, 0, 0, 0)
-    }
-
-    /// Set all currents to maximum (25.5mA)
-    pub fn set_max_current(&mut self) -> Result<(), I2C::Error> {
-        self.write_reg(reg::R_CURRENT, 0xFF)?;
-        self.write_reg(reg::G_CURRENT, 0xFF)?;
-        self.write_reg(reg::B_CURRENT, 0xFF)?;
-        self.write_reg(reg::W_CURRENT, 0xFF)?;
-        Ok(())
-    }
-
     /// Read a register
     pub fn read_reg(&mut self, reg: u8) -> Result<u8, I2C::Error> {
         let mut buf = [0u8; 1];
