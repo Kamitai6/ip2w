@@ -15,6 +15,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a23eb6b1614318a8071c9b2521f36b424b2c83db5eb3a0fead4a6c0809af6e61"
 
 [[package]]
+name = "atom"
+version = "0.1.0"
+dependencies = [
+ "embedded-hal 1.0.0",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -575,7 +582,7 @@ dependencies = [
 
 [[package]]
 name = "esp-bsp"
-version = "0.4.2"
+version = "0.5.0"
 
 [[package]]
 name = "esp-config"
@@ -1079,6 +1086,7 @@ dependencies = [
 name = "ip2w"
 version = "0.1.0"
 dependencies = [
+ "atom",
  "critical-section",
  "defmt 1.0.1",
  "embedded-graphics",

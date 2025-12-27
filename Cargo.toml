@@ -19,13 +19,14 @@ esp-radio = { version = "0.17", features = [
   "wifi",
 ] }
 esp-spidma-interface = { version = "0.3", features = ["esp32s3"], path = "./modules/esp-spidma-interface"}
-esp-bsp = {version = "0.4", features = ["m5atom-s3r"], path = "./modules/esp-bsp"}
+esp-bsp = {version = "0.5", features = ["m5atom-s3r"], path = "./modules/esp-bsp"}
 
 embedded-hal = "1.0"
 embedded-io = { version = "0.7", features = ["defmt"] }
 embedded-graphics = "0.8"
 embedded-hal-bus = "0.3"
 
+atom = {version = "0.1", path = "./modules/atom"}
 critical-section = "1.2"
 defmt = "1.0"
 heapless = "0.9"

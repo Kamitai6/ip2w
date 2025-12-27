@@ -1,6 +1,6 @@
 [package]
 name    = "esp-bsp"
-version = "0.4.2"
+version = "0.5.0"
 authors = [
     "Juraj Michálek <juraj.michalek@espressif.com>"
 ]

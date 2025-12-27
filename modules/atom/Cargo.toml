@@ -1,38 +1,16 @@
 [package]
-name    = "esp-bsp"
-version = "0.4.2"
+name    = "atom"
+version = "0.1.0"
 authors = [
     "Juraj Michálek <juraj.michalek@espressif.com>"
 ]
-edition     = "2021"
+edition     = "2024"
 description = "Rust Bare Metal Board Support Packages for ESP32 related boards with focus on Embassy Async"
 repository  = "https://github.com/georgik/esp-bsp-rs"
 license     = "MIT OR Apache-2.0"
 
 [dependencies]
+embedded-hal = "1.0"
 
 [features]
-# ESP32
-esp32-wrover-kit = []
-m5stack-core2 = []
-m5stack-fire = []
 
-# ESP32-C3
-esp32-c3-devkit-rust = []
-esp32-c3-lcdkit = []
-
-# ESP32-C6
-esp32-c6-devkitc-1 = []
-waveshare-esp32-c6-lcd-1-47 = []
-
-# ESP32-S2 = []
-esp32-s2-kaluga = []
-
-# ESP32-S3
-esp32-s3-box = []
-esp32-s3-box-3 = []
-esp32-s3-usb-otg = []
-m5stack-cores3 = []
-
-# Custom boards are in concept stage and does not work
-custom-board = []

@@ -20,7 +20,10 @@ macro_rules! lcd_spi {
 #[macro_export]
 macro_rules! lcd_reset_pin {
     ($peripherals:ident) => {
-        ::esp_hal::gpio::Output::new($peripherals.GPIO48, Level::High, OutputConfig::default())
+        ::esp_hal::gpio::Output::new(
+            $peripherals.GPIO48, 
+            ::esp_hal::gpio::Level::High, 
+            ::esp_hal::gpio::OutputConfig::default())
     };
 }
 
@@ -42,15 +45,15 @@ macro_rules! lcd_display {
     ($peripherals:ident, $di:expr, $delay:expr) => {
         ::esp_bsp::shared_lcd_display!(
             $di,
-            mipidsi::models::GC9107,
+            ::mipidsi::models::GC9107,
             ::esp_bsp::lcd_reset_pin!($peripherals),
             $crate::LCD_SIZE_W as u16,
             $crate::LCD_SIZE_H as u16,
             $crate::LCD_OFFSET_W as u16,
             $crate::LCD_OFFSET_H as u16,
-            mipidsi::options::Orientation::new(),
-            mipidsi::options::ColorOrder::Bgr,
-            mipidsi::options::ColorInversion::Normal
+            ::mipidsi::options::Orientation::new().rotate(::mipidsi::options::Rotation::Deg180),
+            ::mipidsi::options::ColorOrder::Bgr,
+            ::mipidsi::options::ColorInversion::Normal
         )
         .init($delay)
     };

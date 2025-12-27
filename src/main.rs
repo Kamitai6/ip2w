@@ -30,7 +30,6 @@ use esp_hal::{
     handler,
     ram,
 };
-use esp_spidma_interface::spidma_interface;
 use esp_bsp::{lcd_spi, lcd_backlight_init, lcd_display_interface, lcd_display, i2c_init, BoardType, DisplayConfig};
 use embedded_graphics::{
     prelude::{IntoStorage, RgbColor, Point, DrawTarget},
@@ -47,6 +46,7 @@ use embedded_hal_bus::{
     i2c::{RefCellDevice as I2cRefCellDevice},
     spi::ExclusiveDevice,
 };
+use atom;
 
 extern crate alloc;
 
@@ -55,25 +55,6 @@ extern crate alloc;
 esp_bootloader_esp_idf::esp_app_desc!();
 
 static BUTTON: Mutex<RefCell<Option<Input>>> = Mutex::new(RefCell::new(None));
-pub struct Sensor<I2C> {
-    i2c: I2C,
-    addr: u8,
-}
-impl<I2C: eh_I2c> Sensor<I2C> {
-    pub fn new(i2c: I2C, addr: u8) -> Self {
-        Self { i2c, addr }
-    }
-    pub fn write(&mut self, data: &[u8]) -> Result<(), I2C::Error> {
-        self.i2c.write(self.addr, data)?;
-        Ok(())
-    }
-    pub fn read_reg(&mut self, reg: u8) -> Result<u8, I2C::Error> {
-        let mut buf = [0u8; 1];
-        self.i2c.write_read(self.addr, &[reg], &mut buf)?;
-        Ok(buf[0])
-    }
-}
-type Lp5562Sensor<I2C> = Sensor<I2C>;
 
 #[allow(
     clippy::large_stack_frames,
@@ -99,18 +80,12 @@ fn main() -> ! {
     let i2c = i2c_init!(peripherals);
     let i2c_ref_cell = RefCell::new(i2c);
 
-    // LP5562 
-    let mut lp5562 = Lp5562Sensor::new(
-        I2cRefCellDevice::new(&i2c_ref_cell),
-        0x30,
-    );
-    let _ = lp5562.write(&[0x0D, 0xFF]);
-    let _ = lp5562.write(&[0x0F, 0xFF]); // White
-    let _ = lp5562.write(&[0x0E, 0xFF]); // White
-    let _ = lp5562.write(&[0x00, 0x40]);
+    // LP5562
+    let mut lp5562 = atom::lp5562::Lp5562::new(I2cRefCellDevice::new(&i2c_ref_cell));
+    lp5562.init().unwrap();
     delay.delay_millis(10);
-    let _ = lp5562.write(&[0x08, 0x01]);
-    let _ = lp5562.write(&[0x70, 0x00]);
+    lp5562.set_current(atom::lp5562::Channel::White, 255).unwrap();
+    lp5562.set_pwm(atom::lp5562::Channel::White, 255).unwrap(); // 白色点灯
 
     // Initialize IMU
     // let mut imu = Mpu6886::new(i2c_bus.acquire_i2c());
@@ -132,8 +107,8 @@ fn main() -> ! {
     delay.delay_millis(1000);
     display.clear(Rgb565::WHITE).unwrap();
 
-    // let _ = Text::with_alignment("HELLO WORLD!", Point::new(160, 120), MonoTextStyleBuilder::new().font(&FONT_10X20).text_color(RgbColor::BLACK).build(),  Alignment::Center)
-    //     .draw(&mut display);
+    let _ = Text::with_alignment("HELLO WORLD!", Point::new(64, 64), MonoTextStyleBuilder::new().font(&FONT_10X20).text_color(RgbColor::BLACK).build(),  Alignment::Center)
+        .draw(&mut display);
 
     
     // esp_rtos::start(timg0.timer0);
