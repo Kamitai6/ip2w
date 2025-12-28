@@ -756,7 +756,7 @@ impl<I2C: I2c> Bmi270<I2C> {
         config: FocAccConfig,
         mut delay: D,
     ) -> Result<(), Error<I2C::Error>> {
-        const NUM_SAMPLES: i32 = 50;
+        const NUM_SAMPLES: i32 = 1000;
         
         // Ensure accelerometer is enabled
         let pwr = self.read_reg(reg::PWR_CTRL)?;
@@ -793,7 +793,7 @@ impl<I2C: I2c> Bmi270<I2C> {
         let mut sum_z: i32 = 0;
 
         for _ in 0..NUM_SAMPLES {
-            delay(10000); // 10ms between samples
+            delay(1000); // 1ms between samples
             let raw = self.read_accel_raw_internal()?;
             sum_x += raw.x as i32;
             sum_y += raw.y as i32;
@@ -832,7 +832,7 @@ impl<I2C: I2c> Bmi270<I2C> {
         &mut self,
         mut delay: D,
     ) -> Result<(), Error<I2C::Error>> {
-        const NUM_SAMPLES: i32 = 50;
+        const NUM_SAMPLES: i32 = 1000;
 
         // Ensure gyroscope is enabled
         let pwr = self.read_reg(reg::PWR_CTRL)?;
@@ -851,7 +851,7 @@ impl<I2C: I2c> Bmi270<I2C> {
         let mut sum_z: i32 = 0;
 
         for _ in 0..NUM_SAMPLES {
-            delay(10000); // 10ms between samples
+            delay(1000); // 1ms between samples
             let raw = self.read_gyro_raw_internal()?;
             sum_x += raw.x as i32;
             sum_y += raw.y as i32;

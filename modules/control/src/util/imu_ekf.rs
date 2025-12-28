@@ -1,70 +1,33 @@
 //! Quaternion Extended Kalman Filter for IMU Attitude Estimation
 //!
-//! A `no_std` compatible EKF implementation for 6-axis IMU sensor fusion.
-//! Uses quaternion representation with gyroscope bias estimation.
-//!
-//! # State Vector (7 elements)
-//! - q0, q1, q2, q3: Orientation quaternion
-//! - bx, by, bz: Gyroscope biases (rad/s)
-//!
-//! # Features
-//! - Quaternion representation (no gimbal lock)
-//! - Automatic gyroscope bias estimation
-//! - All matrix operations manually unrolled for speed
-//! - Optimized for ESP32 (~20μs per update at 240MHz)
-//!
-//! # Example
-//!
-//! ```no_run
-//! use imu_filter::{ImuEkf, EkfConfig};
-//!
-//! let mut ekf = ImuEkf::new(EkfConfig::default());
-//!
-//! loop {
-//!     let (ax, ay, az) = imu.read_accel().unwrap();  // g
-//!     let (gx, gy, gz) = imu.read_gyro().unwrap();   // °/s
-//!
-//!     let state = ekf.update_deg(ax, ay, az, gx, gy, gz);
-//!     
-//!     let pitch = state.pitch;  // radians
-//!     let roll = state.roll;
-//! }
-//! ```
+//! バイアス相関によるyawドリフト軽減版
 
 #![no_std]
 
 use core::f32::consts::PI;
-use libm::{atan2f, asinf, sqrtf, fabsf, cosf, sinf};
+use libm::{atan2f, asinf, sqrtf, cosf, sinf};
 
-/// Degrees to radians
 const DEG_TO_RAD: f32 = PI / 180.0;
-/// Radians to degrees
 const RAD_TO_DEG: f32 = 180.0 / PI;
 
 /// EKF Configuration
 #[derive(Debug, Clone, Copy)]
 pub struct EkfConfig {
-    /// Sample period in seconds
     pub dt: f32,
-    
-    /// Gyroscope noise standard deviation (rad/s)
     pub gyro_noise: f32,
-    
-    /// Gyroscope bias random walk (rad/s²)
     pub gyro_bias_noise: f32,
-    
-    /// Accelerometer noise standard deviation (g)
     pub accel_noise: f32,
-    
-    /// Initial quaternion variance
     pub initial_quat_variance: f32,
-    
-    /// Initial bias variance (rad/s)²
     pub initial_bias_variance: f32,
-    
-    /// Accelerometer magnitude bounds for valid measurement
     pub accel_magnitude_min: f32,
     pub accel_magnitude_max: f32,
+    
+    // ===== バイアス相関パラメータ =====
+    /// バイアス相関を有効にするか
+    pub bias_correlation_enabled: bool,
+    
+    /// X/Y軸バイアス変化からZ軸への伝搬係数 (0.0-1.0)
+    pub bias_correlation_factor: f32,
 }
 
 impl Default for EkfConfig {
@@ -78,11 +41,14 @@ impl Default for EkfConfig {
             initial_bias_variance: 0.01,
             accel_magnitude_min: 0.8,
             accel_magnitude_max: 1.2,
+            
+            // バイアス相関のデフォルト値
+            bias_correlation_enabled: true,
+            bias_correlation_factor: 0.3,
         }
     }
 }
 
-/// Quaternion [w, x, y, z]
 #[derive(Debug, Clone, Copy)]
 pub struct Quaternion {
     pub w: f32,
@@ -92,9 +58,7 @@ pub struct Quaternion {
 }
 
 impl Default for Quaternion {
-    fn default() -> Self {
-        Self::identity()
-    }
+    fn default() -> Self { Self::identity() }
 }
 
 impl Quaternion {
@@ -115,23 +79,15 @@ impl Quaternion {
         }
     }
 
-    /// Convert to Euler angles (roll, pitch, yaw) in radians
     #[inline]
     pub fn to_euler(&self) -> (f32, f32, f32) {
-        // Roll (x-axis)
         let sinr_cosp = 2.0 * (self.w * self.x + self.y * self.z);
         let cosr_cosp = 1.0 - 2.0 * (self.x * self.x + self.y * self.y);
         let roll = atan2f(sinr_cosp, cosr_cosp);
 
-        // Pitch (y-axis)
-        let sinp = 2.0 * (self.w * self.y - self.z * self.x);
-        let pitch = if fabsf(sinp) >= 1.0 {
-            if sinp >= 0.0 { PI / 2.0 } else { -PI / 2.0 }
-        } else {
-            asinf(sinp)
-        };
+        let sinp = (2.0 * (self.w * self.y - self.z * self.x)).clamp(-1.0, 1.0);
+        let pitch = asinf(sinp);
 
-        // Yaw (z-axis)
         let siny_cosp = 2.0 * (self.w * self.z + self.x * self.y);
         let cosy_cosp = 1.0 - 2.0 * (self.y * self.y + self.z * self.z);
         let yaw = atan2f(siny_cosp, cosy_cosp);
@@ -140,60 +96,23 @@ impl Quaternion {
     }
 }
 
-/// Attitude state output
 #[derive(Debug, Clone, Copy, Default)]
 pub struct AttitudeState {
-    /// Euler angles in radians
     pub roll: f32,
     pub pitch: f32,
     pub yaw: f32,
-
-    /// Angular rates in rad/s (bias-corrected)
     pub roll_rate: f32,
     pub pitch_rate: f32,
     pub yaw_rate: f32,
-
-    /// Estimated gyroscope biases in rad/s
     pub gyro_bias_x: f32,
     pub gyro_bias_y: f32,
     pub gyro_bias_z: f32,
-
-    /// Current quaternion
     pub quaternion: Quaternion,
-
-    /// Diagonal of covariance matrix (uncertainties)
     pub quat_variance: f32,
     pub bias_variance: f32,
-
-    /// Accelerometer used in this update
     pub accel_valid: bool,
 }
 
-/// Quaternion Extended Kalman Filter
-///
-/// State: [q0, q1, q2, q3, bx, by, bz]
-pub struct ImuEkf {
-    // State vector
-    q: Quaternion,
-    bias: [f32; 3],
-
-    // Covariance matrix P (7x7 symmetric, store upper triangle = 28 elements)
-    p: [f32; 28],
-
-    // Process noise
-    q_gyro: f32,
-    q_bias: f32,
-
-    // Measurement noise
-    r_accel: f32,
-
-    config: EkfConfig,
-    
-    last_gyro: [f32; 3],
-    initialized: bool,
-}
-
-// Helper to access symmetric matrix elements
 #[inline(always)]
 fn sym_idx(i: usize, j: usize) -> usize {
     if i <= j {
@@ -203,11 +122,21 @@ fn sym_idx(i: usize, j: usize) -> usize {
     }
 }
 
+pub struct ImuEkf {
+    q: Quaternion,
+    bias: [f32; 3],
+    p: [f32; 28],
+    q_gyro: f32,
+    q_bias: f32,
+    r_accel: f32,
+    config: EkfConfig,
+    last_gyro: [f32; 3],
+    initialized: bool,
+}
+
 impl ImuEkf {
-    /// Create new EKF with given configuration
     pub fn new(config: EkfConfig) -> Self {
         let dt = config.dt;
-        
         let q_gyro = config.gyro_noise * config.gyro_noise * dt;
         let q_bias = config.gyro_bias_noise * config.gyro_bias_noise * dt;
         let r_accel = config.accel_noise * config.accel_noise;
@@ -215,7 +144,6 @@ impl ImuEkf {
         let pq = config.initial_quat_variance;
         let pb = config.initial_bias_variance;
         
-        // Initial covariance (diagonal only)
         let mut p = [0.0f32; 28];
         p[sym_idx(0, 0)] = pq;
         p[sym_idx(1, 1)] = pq;
@@ -238,25 +166,17 @@ impl ImuEkf {
         }
     }
 
-    /// Update filter with IMU measurements
-    ///
-    /// # Arguments
-    /// * `ax, ay, az` - Accelerometer in g
-    /// * `gx, gy, gz` - Gyroscope in rad/s
     pub fn update(&mut self, ax: f32, ay: f32, az: f32, gx: f32, gy: f32, gz: f32) -> AttitudeState {
         self.last_gyro = [gx, gy, gz];
 
-        // Bias-corrected gyro
         let wx = gx - self.bias[0];
         let wy = gy - self.bias[1];
         let wz = gz - self.bias[2];
 
-        // Check accelerometer validity
         let accel_norm_sq = ax * ax + ay * ay + az * az;
         let accel_valid = accel_norm_sq >= self.config.accel_magnitude_min * self.config.accel_magnitude_min
             && accel_norm_sq <= self.config.accel_magnitude_max * self.config.accel_magnitude_max;
 
-        // Initialize on first valid accelerometer reading
         if !self.initialized && accel_valid {
             self.init_from_accel(ax, ay, az);
             self.initialized = true;
@@ -268,25 +188,47 @@ impl ImuEkf {
         // ===== UPDATE STEP =====
         if accel_valid && accel_norm_sq > 1e-10 {
             let norm_inv = 1.0 / sqrtf(accel_norm_sq);
+            
+            // バイアス変化量を追跡
+            let bias_before = self.bias;
+            
             self.update_accel(ax * norm_inv, ay * norm_inv, az * norm_inv);
+            
+            // ===== バイアス相関による Z軸バイアス補正 =====
+            if self.config.bias_correlation_enabled {
+                let dx = self.bias[0] - bias_before[0];
+                let dy = self.bias[1] - bias_before[1];
+                self.apply_bias_correlation(dx, dy);
+            }
         }
 
-        // Normalize quaternion
         self.q.normalize();
-
-        // Ensure covariance stays positive definite
         self.ensure_positive_definite();
 
-        // Build output
-        let (roll, pitch, yaw) = self.q.to_euler();
+        self.build_current_state(accel_valid)
+    }
 
+    /// X/Y軸のバイアス変化をZ軸にも伝搬
+    /// X/Y軸のバイアス変化をZ軸にも伝搬
+    fn apply_bias_correlation(&mut self, dx: f32, dy: f32) {
+        let factor = self.config.bias_correlation_factor;
+        let avg_delta = (dx + dy) / 2.0;
+        self.bias[2] += avg_delta * factor;
+        
+        // Z軸バイアスの不確実性を下げる
+        // X/Y軸から間接的に観測されたと見なす
+        self.p[sym_idx(6, 6)] *= 1.0 - factor * 0.1;
+    }
+
+    fn build_current_state(&self, accel_valid: bool) -> AttitudeState {
+        let (roll, pitch, yaw) = self.q.to_euler();
         AttitudeState {
             roll,
             pitch,
             yaw,
-            roll_rate: wx,
-            pitch_rate: wy,
-            yaw_rate: wz,
+            roll_rate: self.last_gyro[0] - self.bias[0],
+            pitch_rate: self.last_gyro[1] - self.bias[1],
+            yaw_rate: self.last_gyro[2] - self.bias[2],
             gyro_bias_x: self.bias[0],
             gyro_bias_y: self.bias[1],
             gyro_bias_z: self.bias[2],
@@ -297,7 +239,6 @@ impl ImuEkf {
         }
     }
 
-    /// Update with gyroscope in degrees/second
     #[inline]
     pub fn update_deg(
         &mut self,
@@ -312,7 +253,6 @@ impl ImuEkf {
         )
     }
 
-    /// Prediction step using gyroscope
     fn predict(&mut self, wx: f32, wy: f32, wz: f32) {
         let dt = self.config.dt;
         let dt_half = dt * 0.5;
@@ -322,29 +262,21 @@ impl ImuEkf {
         let q2 = self.q.y;
         let q3 = self.q.z;
 
-        // Quaternion derivative: q_dot = 0.5 * q ⊗ ω
         self.q.w += dt_half * (-q1 * wx - q2 * wy - q3 * wz);
         self.q.x += dt_half * (q0 * wx + q2 * wz - q3 * wy);
         self.q.y += dt_half * (q0 * wy - q1 * wz + q3 * wx);
         self.q.z += dt_half * (q0 * wz + q1 * wy - q2 * wx);
-
-        // State transition Jacobian F (simplified)
-        // F_qq ≈ I + 0.5*dt*Ω(ω)
-        // F_qb = -0.5*dt*[q]_R (right quaternion matrix cols 1-3)
-        // F_bb = I
 
         let f01 = -dt_half * wx; let f02 = -dt_half * wy; let f03 = -dt_half * wz;
         let f10 =  dt_half * wx; let f12 =  dt_half * wz; let f13 = -dt_half * wy;
         let f20 =  dt_half * wy; let f21 = -dt_half * wz; let f23 =  dt_half * wx;
         let f30 =  dt_half * wz; let f31 =  dt_half * wy; let f32 = -dt_half * wx;
 
-        // F_qb elements
         let f04 =  dt_half * q1; let f05 =  dt_half * q2; let f06 =  dt_half * q3;
         let f14 = -dt_half * q0; let f15 = -dt_half * q3; let f16 =  dt_half * q2;
         let f24 =  dt_half * q3; let f25 = -dt_half * q0; let f26 = -dt_half * q1;
         let f34 = -dt_half * q2; let f35 =  dt_half * q1; let f36 = -dt_half * q0;
 
-        // Load P into local variables for faster access
         let p00 = self.p[sym_idx(0,0)]; let p01 = self.p[sym_idx(0,1)]; let p02 = self.p[sym_idx(0,2)];
         let p03 = self.p[sym_idx(0,3)]; let p04 = self.p[sym_idx(0,4)]; let p05 = self.p[sym_idx(0,5)];
         let p06 = self.p[sym_idx(0,6)];
@@ -358,8 +290,6 @@ impl ImuEkf {
         let p55 = self.p[sym_idx(5,5)]; let p56 = self.p[sym_idx(5,6)];
         let p66 = self.p[sym_idx(6,6)];
 
-        // Compute F*P (row by row, only upper triangle needed)
-        // Row 0: F[0,:] * P
         let fp00 = p00 + f01*p01 + f02*p02 + f03*p03 + f04*p04 + f05*p05 + f06*p06;
         let fp01 = p01 + f01*p11 + f02*p12 + f03*p13 + f04*p14 + f05*p15 + f06*p16;
         let fp02 = p02 + f01*p12 + f02*p22 + f03*p23 + f04*p24 + f05*p25 + f06*p26;
@@ -392,13 +322,10 @@ impl ImuEkf {
         let fp35 = f30*p05 + f31*p15 + f32*p25 + p35 + f34*p45 + f35*p55 + f36*p56;
         let fp36 = f30*p06 + f31*p16 + f32*p26 + p36 + f34*p46 + f35*p56 + f36*p66;
 
-        // Bias rows unchanged (F_bb = I)
         let fp44 = p44; let fp45 = p45; let fp46 = p46;
         let fp55 = p55; let fp56 = p56;
         let fp66 = p66;
 
-        // Now P' = F*P*F^T + Q
-        // Compute upper triangle
         let q_q = self.q_gyro;
         let q_b = self.q_bias;
 
@@ -434,31 +361,28 @@ impl ImuEkf {
         self.p[sym_idx(5,5)] = fp55 + q_b;
         self.p[sym_idx(5,6)] = fp56;
         self.p[sym_idx(6,6)] = fp66 + q_b;
+
+        self.ensure_positive_definite();
     }
 
-    /// Update step using accelerometer (normalized input)
     fn update_accel(&mut self, ax: f32, ay: f32, az: f32) {
         let q0 = self.q.w;
         let q1 = self.q.x;
         let q2 = self.q.y;
         let q3 = self.q.z;
 
-        // Expected gravity in body frame: h(q) = R(q)^T * [0, 0, 1]^T
         let hx = 2.0 * (q1 * q3 - q0 * q2);
         let hy = 2.0 * (q0 * q1 + q2 * q3);
         let hz = q0 * q0 - q1 * q1 - q2 * q2 + q3 * q3;
 
-        // Innovation
         let y0 = ax - hx;
         let y1 = ay - hy;
         let y2 = az - hz;
 
-        // Measurement Jacobian H (3x7), only first 4 columns are non-zero
         let h00 = -2.0 * q2; let h01 =  2.0 * q3; let h02 = -2.0 * q0; let h03 =  2.0 * q1;
         let h10 =  2.0 * q1; let h11 =  2.0 * q0; let h12 =  2.0 * q3; let h13 =  2.0 * q2;
         let h20 =  2.0 * q0; let h21 = -2.0 * q1; let h22 = -2.0 * q2; let h23 =  2.0 * q3;
 
-        // Load P
         let p00 = self.p[sym_idx(0,0)]; let p01 = self.p[sym_idx(0,1)]; let p02 = self.p[sym_idx(0,2)];
         let p03 = self.p[sym_idx(0,3)]; let p04 = self.p[sym_idx(0,4)]; let p05 = self.p[sym_idx(0,5)];
         let p06 = self.p[sym_idx(0,6)];
@@ -472,7 +396,6 @@ impl ImuEkf {
         let p55 = self.p[sym_idx(5,5)]; let p56 = self.p[sym_idx(5,6)];
         let p66 = self.p[sym_idx(6,6)];
 
-        // P*H^T (7x3)
         let pht00 = p00*h00 + p01*h01 + p02*h02 + p03*h03;
         let pht01 = p00*h10 + p01*h11 + p02*h12 + p03*h13;
         let pht02 = p00*h20 + p01*h21 + p02*h22 + p03*h23;
@@ -495,7 +418,6 @@ impl ImuEkf {
         let pht61 = p06*h10 + p16*h11 + p26*h12 + p36*h13;
         let pht62 = p06*h20 + p16*h21 + p26*h22 + p36*h23;
 
-        // S = H*P*H^T + R (3x3 symmetric)
         let r = self.r_accel;
         let s00 = h00*pht00 + h01*pht10 + h02*pht20 + h03*pht30 + r;
         let s01 = h00*pht01 + h01*pht11 + h02*pht21 + h03*pht31;
@@ -504,10 +426,8 @@ impl ImuEkf {
         let s12 = h10*pht02 + h11*pht12 + h12*pht22 + h13*pht32;
         let s22 = h20*pht02 + h21*pht12 + h22*pht22 + h23*pht32 + r;
 
-        // Invert S
         let (si00, si01, si02, si11, si12, si22) = Self::invert_sym3(s00, s01, s02, s11, s12, s22);
 
-        // Kalman gain K = P*H^T * S^-1 (7x3)
         let k00 = pht00*si00 + pht01*si01 + pht02*si02;
         let k01 = pht00*si01 + pht01*si11 + pht02*si12;
         let k02 = pht00*si02 + pht01*si12 + pht02*si22;
@@ -530,17 +450,23 @@ impl ImuEkf {
         let k61 = pht60*si01 + pht61*si11 + pht62*si12;
         let k62 = pht60*si02 + pht61*si12 + pht62*si22;
 
-        // State update
-        self.q.w += k00*y0 + k01*y1 + k02*y2;
-        self.q.x += k10*y0 + k11*y1 + k12*y2;
-        self.q.y += k20*y0 + k21*y1 + k22*y2;
-        self.q.z += k30*y0 + k31*y1 + k32*y2;
-        self.bias[0] += k40*y0 + k41*y1 + k42*y2;
-        self.bias[1] += k50*y0 + k51*y1 + k52*y2;
-        self.bias[2] += k60*y0 + k61*y1 + k62*y2;
+        let dq0 = k00*y0 + k01*y1 + k02*y2;
+        let dq1 = k10*y0 + k11*y1 + k12*y2;
+        let dq2 = k20*y0 + k21*y1 + k22*y2;
+        let dq3 = k30*y0 + k31*y1 + k32*y2;
+        let db0 = k40*y0 + k41*y1 + k42*y2;
+        let db1 = k50*y0 + k51*y1 + k52*y2;
+        let db2 = k60*y0 + k61*y1 + k62*y2;
 
-        // Covariance update P = (I - K*H) * P
-        // Compute (I - K*H) matrix elements (only first 4 cols matter)
+        self.q.w += dq0;
+        self.q.x += dq1;
+        self.q.y += dq2;
+        self.q.z += dq3;
+        self.bias[0] += db0;
+        self.bias[1] += db1;
+        self.bias[2] += db2;
+
+        // Joseph形式の共分散更新
         let m00 = 1.0 - (k00*h00 + k01*h10 + k02*h20);
         let m01 = -(k00*h01 + k01*h11 + k02*h21);
         let m02 = -(k00*h02 + k01*h12 + k02*h22);
@@ -570,44 +496,100 @@ impl ImuEkf {
         let m62 = -(k60*h02 + k61*h12 + k62*h22);
         let m63 = -(k60*h03 + k61*h13 + k62*h23);
 
-        // P' = M * P (upper triangle)
-        self.p[sym_idx(0,0)] = m00*p00 + m01*p01 + m02*p02 + m03*p03;
-        self.p[sym_idx(0,1)] = m00*p01 + m01*p11 + m02*p12 + m03*p13;
-        self.p[sym_idx(0,2)] = m00*p02 + m01*p12 + m02*p22 + m03*p23;
-        self.p[sym_idx(0,3)] = m00*p03 + m01*p13 + m02*p23 + m03*p33;
-        self.p[sym_idx(0,4)] = m00*p04 + m01*p14 + m02*p24 + m03*p34;
-        self.p[sym_idx(0,5)] = m00*p05 + m01*p15 + m02*p25 + m03*p35;
-        self.p[sym_idx(0,6)] = m00*p06 + m01*p16 + m02*p26 + m03*p36;
+        let mp00 = m00*p00 + m01*p01 + m02*p02 + m03*p03;
+        let mp01 = m00*p01 + m01*p11 + m02*p12 + m03*p13;
+        let mp02 = m00*p02 + m01*p12 + m02*p22 + m03*p23;
+        let mp03 = m00*p03 + m01*p13 + m02*p23 + m03*p33;
+        let mp04 = m00*p04 + m01*p14 + m02*p24 + m03*p34;
+        let mp05 = m00*p05 + m01*p15 + m02*p25 + m03*p35;
+        let mp06 = m00*p06 + m01*p16 + m02*p26 + m03*p36;
 
-        self.p[sym_idx(1,1)] = m10*p01 + m11*p11 + m12*p12 + m13*p13;
-        self.p[sym_idx(1,2)] = m10*p02 + m11*p12 + m12*p22 + m13*p23;
-        self.p[sym_idx(1,3)] = m10*p03 + m11*p13 + m12*p23 + m13*p33;
-        self.p[sym_idx(1,4)] = m10*p04 + m11*p14 + m12*p24 + m13*p34;
-        self.p[sym_idx(1,5)] = m10*p05 + m11*p15 + m12*p25 + m13*p35;
-        self.p[sym_idx(1,6)] = m10*p06 + m11*p16 + m12*p26 + m13*p36;
+        let mp10 = m10*p00 + m11*p01 + m12*p02 + m13*p03;
+        let mp11 = m10*p01 + m11*p11 + m12*p12 + m13*p13;
+        let mp12 = m10*p02 + m11*p12 + m12*p22 + m13*p23;
+        let mp13 = m10*p03 + m11*p13 + m12*p23 + m13*p33;
+        let mp14 = m10*p04 + m11*p14 + m12*p24 + m13*p34;
+        let mp15 = m10*p05 + m11*p15 + m12*p25 + m13*p35;
+        let mp16 = m10*p06 + m11*p16 + m12*p26 + m13*p36;
 
-        self.p[sym_idx(2,2)] = m20*p02 + m21*p12 + m22*p22 + m23*p23;
-        self.p[sym_idx(2,3)] = m20*p03 + m21*p13 + m22*p23 + m23*p33;
-        self.p[sym_idx(2,4)] = m20*p04 + m21*p14 + m22*p24 + m23*p34;
-        self.p[sym_idx(2,5)] = m20*p05 + m21*p15 + m22*p25 + m23*p35;
-        self.p[sym_idx(2,6)] = m20*p06 + m21*p16 + m22*p26 + m23*p36;
+        let mp20 = m20*p00 + m21*p01 + m22*p02 + m23*p03;
+        let mp21 = m20*p01 + m21*p11 + m22*p12 + m23*p13;
+        let mp22 = m20*p02 + m21*p12 + m22*p22 + m23*p23;
+        let mp23 = m20*p03 + m21*p13 + m22*p23 + m23*p33;
+        let mp24 = m20*p04 + m21*p14 + m22*p24 + m23*p34;
+        let mp25 = m20*p05 + m21*p15 + m22*p25 + m23*p35;
+        let mp26 = m20*p06 + m21*p16 + m22*p26 + m23*p36;
 
-        self.p[sym_idx(3,3)] = m30*p03 + m31*p13 + m32*p23 + m33*p33;
-        self.p[sym_idx(3,4)] = m30*p04 + m31*p14 + m32*p24 + m33*p34;
-        self.p[sym_idx(3,5)] = m30*p05 + m31*p15 + m32*p25 + m33*p35;
-        self.p[sym_idx(3,6)] = m30*p06 + m31*p16 + m32*p26 + m33*p36;
+        let mp30 = m30*p00 + m31*p01 + m32*p02 + m33*p03;
+        let mp31 = m30*p01 + m31*p11 + m32*p12 + m33*p13;
+        let mp32 = m30*p02 + m31*p12 + m32*p22 + m33*p23;
+        let mp33 = m30*p03 + m31*p13 + m32*p23 + m33*p33;
+        let mp34 = m30*p04 + m31*p14 + m32*p24 + m33*p34;
+        let mp35 = m30*p05 + m31*p15 + m32*p25 + m33*p35;
+        let mp36 = m30*p06 + m31*p16 + m32*p26 + m33*p36;
 
-        self.p[sym_idx(4,4)] = m40*p04 + m41*p14 + m42*p24 + m43*p34 + p44;
-        self.p[sym_idx(4,5)] = m40*p05 + m41*p15 + m42*p25 + m43*p35 + p45;
-        self.p[sym_idx(4,6)] = m40*p06 + m41*p16 + m42*p26 + m43*p36 + p46;
+        let mp40 = m40*p00 + m41*p01 + m42*p02 + m43*p03 + p04;
+        let mp41 = m40*p01 + m41*p11 + m42*p12 + m43*p13 + p14;
+        let mp42 = m40*p02 + m41*p12 + m42*p22 + m43*p23 + p24;
+        let mp43 = m40*p03 + m41*p13 + m42*p23 + m43*p33 + p34;
+        let mp44 = m40*p04 + m41*p14 + m42*p24 + m43*p34 + p44;
+        let mp45 = m40*p05 + m41*p15 + m42*p25 + m43*p35 + p45;
+        let mp46 = m40*p06 + m41*p16 + m42*p26 + m43*p36 + p46;
 
-        self.p[sym_idx(5,5)] = m50*p05 + m51*p15 + m52*p25 + m53*p35 + p55;
-        self.p[sym_idx(5,6)] = m50*p06 + m51*p16 + m52*p26 + m53*p36 + p56;
+        let mp50 = m50*p00 + m51*p01 + m52*p02 + m53*p03 + p05;
+        let mp51 = m50*p01 + m51*p11 + m52*p12 + m53*p13 + p15;
+        let mp52 = m50*p02 + m51*p12 + m52*p22 + m53*p23 + p25;
+        let mp53 = m50*p03 + m51*p13 + m52*p23 + m53*p33 + p35;
+        let mp54 = m50*p04 + m51*p14 + m52*p24 + m53*p34 + p45;
+        let mp55 = m50*p05 + m51*p15 + m52*p25 + m53*p35 + p55;
+        let mp56 = m50*p06 + m51*p16 + m52*p26 + m53*p36 + p56;
 
-        self.p[sym_idx(6,6)] = m60*p06 + m61*p16 + m62*p26 + m63*p36 + p66;
+        let mp60 = m60*p00 + m61*p01 + m62*p02 + m63*p03 + p06;
+        let mp61 = m60*p01 + m61*p11 + m62*p12 + m63*p13 + p16;
+        let mp62 = m60*p02 + m61*p12 + m62*p22 + m63*p23 + p26;
+        let mp63 = m60*p03 + m61*p13 + m62*p23 + m63*p33 + p36;
+        let mp64 = m60*p04 + m61*p14 + m62*p24 + m63*p34 + p46;
+        let mp65 = m60*p05 + m61*p15 + m62*p25 + m63*p35 + p56;
+        let mp66 = m60*p06 + m61*p16 + m62*p26 + m63*p36 + p66;
+
+        let krk0 = r * (k00*k00 + k01*k01 + k02*k02);
+        let krk1 = r * (k10*k10 + k11*k11 + k12*k12);
+        let krk2 = r * (k20*k20 + k21*k21 + k22*k22);
+        let krk3 = r * (k30*k30 + k31*k31 + k32*k32);
+        let krk4 = r * (k40*k40 + k41*k41 + k42*k42);
+        let krk5 = r * (k50*k50 + k51*k51 + k52*k52);
+        let krk6 = r * (k60*k60 + k61*k61 + k62*k62);
+
+        self.p[sym_idx(0,0)] = mp00*m00 + mp01*m01 + mp02*m02 + mp03*m03 + krk0;
+        self.p[sym_idx(0,1)] = mp00*m10 + mp01*m11 + mp02*m12 + mp03*m13;
+        self.p[sym_idx(0,2)] = mp00*m20 + mp01*m21 + mp02*m22 + mp03*m23;
+        self.p[sym_idx(0,3)] = mp00*m30 + mp01*m31 + mp02*m32 + mp03*m33;
+        self.p[sym_idx(0,4)] = mp00*m40 + mp01*m41 + mp02*m42 + mp03*m43 + mp04;
+        self.p[sym_idx(0,5)] = mp00*m50 + mp01*m51 + mp02*m52 + mp03*m53 + mp05;
+        self.p[sym_idx(0,6)] = mp00*m60 + mp01*m61 + mp02*m62 + mp03*m63 + mp06;
+        self.p[sym_idx(1,1)] = mp10*m10 + mp11*m11 + mp12*m12 + mp13*m13 + krk1;
+        self.p[sym_idx(1,2)] = mp10*m20 + mp11*m21 + mp12*m22 + mp13*m23;
+        self.p[sym_idx(1,3)] = mp10*m30 + mp11*m31 + mp12*m32 + mp13*m33;
+        self.p[sym_idx(1,4)] = mp10*m40 + mp11*m41 + mp12*m42 + mp13*m43 + mp14;
+        self.p[sym_idx(1,5)] = mp10*m50 + mp11*m51 + mp12*m52 + mp13*m53 + mp15;
+        self.p[sym_idx(1,6)] = mp10*m60 + mp11*m61 + mp12*m62 + mp13*m63 + mp16;
+        self.p[sym_idx(2,2)] = mp20*m20 + mp21*m21 + mp22*m22 + mp23*m23 + krk2;
+        self.p[sym_idx(2,3)] = mp20*m30 + mp21*m31 + mp22*m32 + mp23*m33;
+        self.p[sym_idx(2,4)] = mp20*m40 + mp21*m41 + mp22*m42 + mp23*m43 + mp24;
+        self.p[sym_idx(2,5)] = mp20*m50 + mp21*m51 + mp22*m52 + mp23*m53 + mp25;
+        self.p[sym_idx(2,6)] = mp20*m60 + mp21*m61 + mp22*m62 + mp23*m63 + mp26;
+        self.p[sym_idx(3,3)] = mp30*m30 + mp31*m31 + mp32*m32 + mp33*m33 + krk3;
+        self.p[sym_idx(3,4)] = mp30*m40 + mp31*m41 + mp32*m42 + mp33*m43 + mp34;
+        self.p[sym_idx(3,5)] = mp30*m50 + mp31*m51 + mp32*m52 + mp33*m53 + mp35;
+        self.p[sym_idx(3,6)] = mp30*m60 + mp31*m61 + mp32*m62 + mp33*m63 + mp36;
+        self.p[sym_idx(4,4)] = mp40*m40 + mp41*m41 + mp42*m42 + mp43*m43 + mp44 + krk4;
+        self.p[sym_idx(4,5)] = mp40*m50 + mp41*m51 + mp42*m52 + mp43*m53 + mp45;
+        self.p[sym_idx(4,6)] = mp40*m60 + mp41*m61 + mp42*m62 + mp43*m63 + mp46;
+        self.p[sym_idx(5,5)] = mp50*m50 + mp51*m51 + mp52*m52 + mp53*m53 + mp55 + krk5;
+        self.p[sym_idx(5,6)] = mp50*m60 + mp51*m61 + mp52*m62 + mp53*m63 + mp56;
+        self.p[sym_idx(6,6)] = mp60*m60 + mp61*m61 + mp62*m62 + mp63*m63 + mp66 + krk6;
     }
 
-    /// Invert 3x3 symmetric matrix
     #[inline]
     fn invert_sym3(a00: f32, a01: f32, a02: f32, a11: f32, a12: f32, a22: f32) 
         -> (f32, f32, f32, f32, f32, f32) 
@@ -615,10 +597,6 @@ impl ImuEkf {
         let det = a00 * (a11 * a22 - a12 * a12)
                 - a01 * (a01 * a22 - a12 * a02)
                 + a02 * (a01 * a12 - a11 * a02);
-
-        if fabsf(det) < 1e-10 {
-            return (1.0, 0.0, 0.0, 1.0, 0.0, 1.0);
-        }
 
         let inv_det = 1.0 / det;
         (
@@ -630,11 +608,9 @@ impl ImuEkf {
             (a00 * a11 - a01 * a01) * inv_det,
         )
     }
-
+    
     fn init_from_accel(&mut self, ax: f32, ay: f32, az: f32) {
         let norm = sqrtf(ax * ax + ay * ay + az * az);
-        if norm < 1e-10 { return; }
-
         let ax = ax / norm;
         let ay = ay / norm;
         let az = az / norm;
@@ -656,16 +632,28 @@ impl ImuEkf {
 
     fn ensure_positive_definite(&mut self) {
         const MIN_VAR: f32 = 1e-8;
-        const MAX_VAR: f32 = 1e4;
+        const MAX_VAR: f32 = 1.0;
+        const MAX_BIAS_VAR: f32 = 0.1;
 
-        for i in 0..7 {
+        for i in 0..4 {
             let idx = sym_idx(i, i);
             self.p[idx] = self.p[idx].clamp(MIN_VAR, MAX_VAR);
+        }
+        for i in 4..7 {
+            let idx = sym_idx(i, i);
+            self.p[idx] = self.p[idx].clamp(MIN_VAR, MAX_BIAS_VAR);
+        }
+
+        for i in 0..7 {
+            for j in (i+1)..7 {
+                let idx = sym_idx(i, j);
+                let max_val = libm::sqrtf(self.p[sym_idx(i,i)] * self.p[sym_idx(j,j)]);
+                self.p[idx] = self.p[idx].clamp(-max_val, max_val);
+            }
         }
     }
 
     // ===== Public API =====
-
     #[inline(always)]
     pub fn get_quaternion(&self) -> Quaternion { self.q }
 
@@ -693,10 +681,6 @@ impl ImuEkf {
     #[inline(always)]
     pub fn get_gyro_bias(&self) -> (f32, f32, f32) {
         (self.bias[0], self.bias[1], self.bias[2])
-    }
-
-    pub fn set_gyro_bias(&mut self, bx: f32, by: f32, bz: f32) {
-        self.bias = [bx, by, bz];
     }
 
     pub fn reset(&mut self) {
@@ -727,16 +711,5 @@ impl ImuEkf {
         self.q.y = cr * sp;
         self.q.z = -sr * sp;
         self.q.normalize();
-    }
-
-    #[inline(always)]
-    pub fn is_initialized(&self) -> bool { self.initialized }
-
-    pub fn config(&self) -> &EkfConfig { &self.config }
-
-    pub fn set_dt(&mut self, dt: f32) {
-        self.config.dt = dt;
-        self.q_gyro = self.config.gyro_noise * self.config.gyro_noise * dt;
-        self.q_bias = self.config.gyro_bias_noise * self.config.gyro_bias_noise * dt;
     }
 }

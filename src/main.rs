@@ -7,9 +7,9 @@
 )]
 #![deny(clippy::large_stack_frames)]
 
-use core::cell::RefCell;
+use core::cell::{RefCell, Cell};
 use alloc::borrow::ToOwned;
-use critical_section::Mutex;
+use critical_section::{Mutex, with};
 use defmt::info;
 use {esp_backtrace as _, esp_println as _};
 
@@ -24,7 +24,7 @@ use esp_hal::{
     },
     delay::Delay,
     time::{Duration, Instant, Rate},
-    timer::timg::{Timer, TimerGroup},
+    timer::{Timer, timg::{Timer as Timg, TimerGroup}},
     i2c::master::{I2c, Config as I2cCfg},
     main,
     handler,
@@ -48,13 +48,19 @@ use embedded_hal_bus::{
 use atom::{atom_motion, bmi270, lp5562};
 use control::util;
 
+mod events;
+
 extern crate alloc;
 
 // This creates a default app-descriptor required by the esp-idf bootloader.
 // For more information see: <https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/system/app_image_format.html#application-description>
 esp_bootloader_esp_idf::esp_app_desc!();
 
-static TIMER0: Mutex<RefCell<Option<Timer>>> = Mutex::new(RefCell::new(None));
+const FREQUENCY: u32 = 500;
+const PERIOD_US: u64 = 1_000_000 / FREQUENCY as u64;
+static TIMER0: Mutex<RefCell<Option<Timg>>> = Mutex::new(RefCell::new(None));
+pub static TIMER_COUNTER: Mutex<Cell<u32>> = Mutex::new(Cell::new(0));
+
 
 #[allow(
     clippy::large_stack_frames,
@@ -68,13 +74,9 @@ fn main() -> ! {
     let mut delay = Delay::new();
     let timg0 = TimerGroup::new(peripherals.TIMG0);
 
-    // let mut io = Io::new(peripherals.IO_MUX);
-    // io.set_interrupt_handler(handler);
-    // let mut led = Output::new(peripherals.GPIO2, Level::Low, OutputConfig::default());
-    // let config = InputConfig::default().with_pull(Pull::Up);
-    // let mut button = Input::new(peripherals.GPIO41, config);
+    // let mut button = Input::new(peripherals.GPIO41, InputConfig::default().with_pull(Pull::Up));
 
-    //IR G47
+    //IR GPIO47
 
     let i2c = i2c_init!(peripherals);
     let i2c_ref_cell = RefCell::new(i2c);
@@ -93,7 +95,7 @@ fn main() -> ! {
             acc_odr: bmi270::AccOdr::Hz400,
             gyr_odr: bmi270::GyrOdr::Hz400,
             acc_range: bmi270::AccRange::G4,
-            gyr_range: bmi270::GyrRange::Dps500,
+            gyr_range: bmi270::GyrRange::Dps250,
             acc_bwp: bmi270::AccBwp::Normal,
             gyr_bwp: bmi270::GyrBwp::Normal,
             perf_mode: bmi270::PerfMode::PerfOpt,
@@ -101,20 +103,19 @@ fn main() -> ! {
         &mut |us| delay.delay_micros(us)
     ).unwrap();
 
-    // calibration
-    // imu.perform_foc(bmi270::FocAccConfig::z_up(), |us| delay.delay_micros(us)).unwrap();
-    // let (ax, ay, az) = imu.read_acc_offset(); // (71, -126, -77)
-    // let (gx, gy, gz) = imu.read_gyr_offset(); // (-36, 2, -22)
+    /* calibration */
+    // imu.perform_acc_foc(bmi270::FocAccConfig::z_up(), |us| delay.delay_micros(us)).unwrap();
+    // let (ax, ay, az) = imu.read_acc_offset();
     // info!("AccelOffset: x={}, y={}, z={}", ax, ay, az);
-    // info!("GyroOffset: x={}, y={}, z={}", gx, gy, gz);
-    imu.write_acc_offset((71, -126, -77)); 
-    imu.write_gyr_offset((-36, 2, -22));
+    imu.write_acc_offset((33, -123, -144));
+    /* always calibration */
+    imu.perform_gyr_foc(|us| delay.delay_micros(us)).unwrap();
 
     let mut ekf = util::imu_ekf::ImuEkf::new(
         util::imu_ekf::EkfConfig {
-            dt: 1.0 / 400.0,
-            gyro_noise: 0.01,
-            gyro_bias_noise: 0.0001,
+            dt: 1.0 / FREQUENCY as f32,
+            gyro_noise: 0.05,
+            gyro_bias_noise: 0.0005,
             accel_noise: 0.15,
             accel_magnitude_min: 0.5,
             accel_magnitude_max: 1.5,
@@ -122,9 +123,7 @@ fn main() -> ! {
     });
 
     // Atom Motion motor driver
-    // let mut motion = atom_motion::AtomMotion::new(I2cRefCellDevice::new(&i2c_ref_cell));
-    // motion.set_motor(atom_motion::MotorChannel::M1, 100).unwrap();   // 正転
-    // motion.set_motor(atom_motion::MotorChannel::M2, -100).unwrap();  // 逆転
+    let mut motion = atom_motion::AtomMotion::new(I2cRefCellDevice::new(&i2c_ref_cell));
 
     let lcd_spi = lcd_spi!(peripherals);
     let di = lcd_display_interface!(peripherals, lcd_spi);
@@ -147,45 +146,61 @@ fn main() -> ! {
     //     esp_radio::wifi::new(&radio_init, peripherals.WIFI, Default::default())
     //         .expect("Failed to initialize Wi-Fi controller");
 
-    let mut timer0 = timg0.timer0;
+    let timer0 = timg0.timer0;
     timer0.set_interrupt_handler(tg0_t0_handler);
+    timer0.load_value(Duration::from_micros(PERIOD_US)).unwrap();
+    timer0.enable_auto_reload(true);
     timer0.enable_interrupt(true);
-    timer0.load_alarm_value(1_000_000u64); // マイクロ秒単位
-    timer0.set_alarm_active(true);
     timer0.start();
 
-    critical_section::with(|cs| {
+    with(|cs| {
         TIMER0.borrow_ref_mut(cs).replace(timer0);
     });
 
     loop {
-        info!("Hello world!");
+        // イベントがあるかチェック
+        if events::has_pending_events() {
+            // 全てのイベントを処理
+            while let Some(event) = events::get_event() {
+                match event {
+                    events::Event::MotionUpdate => {
+                        let (ax, ay, az) = imu.read_accel().unwrap();  // g単位
+                        let (gx, gy, gz) = imu.read_gyro().unwrap();   // °/s単位
+                        // info!("gx:{}, gy:{}, gz:{}", gx, gy, gz);
+                        let _ = ekf.update_deg(ax, ay, az, gx, gy, gz);
+                        let r = ekf.get_roll_deg();
+                        let p = ekf.get_pitch_deg();
+                        let y = ekf.get_yaw_deg();
+                        info!("r:{}, p:{}, y:{}", r, p, y);
 
-        // motion.set_motor(atom_motion::MotorChannel::M1, -pid.control).unwrap();
-        // motion.set_motor(atom_motion::MotorChannel::M2, pid.control).unwrap();
-        
-        let (ax, ay, az) = imu.read_accel().unwrap();  // g単位
-        let (gx, gy, gz) = imu.read_gyro().unwrap();   // °/s単位
-        let state = ekf.update_deg(ax, ay, az, gx, gy, gz);
-        
-        delay.delay_millis(1000);
+                        // motion.set_motor(atom_motion::MotorChannel::M1, -pid.control).unwrap();
+                        // motion.set_motor(atom_motion::MotorChannel::M2, pid.control).unwrap();
+                    }
+                    events::Event::DisplayUpdate => {
+
+                    }
+                }
+            }
+        }
     }
 }
 
 // タイマー割り込みハンドラ
 #[handler]
 fn tg0_t0_handler() {
-    critical_section::with(|cs| {
-        // LED トグル
-        // if let Some(led) = LED.borrow_ref_mut(cs).as_mut() {
-        //     led.toggle();
-        // }
-
-        // 割り込みクリア & 次のアラーム設定
+    with(|cs| {
+        let counter = TIMER_COUNTER.borrow(cs).get();
         if let Some(timer) = TIMER0.borrow_ref_mut(cs).as_mut() {
             timer.clear_interrupt();
-            timer.load_alarm_value(1_000_000u64); // 1秒後
-            timer.set_alarm_active(true);
+
+            let div = FREQUENCY;
+            if counter % div == 0 {
+                events::post_event(events::Event::MotionUpdate);
+            }
+            let div = div * 10;
+            if counter % div == 0 {
+                events::post_event(events::Event::DisplayUpdate);
+            }
         }
     });
 }
