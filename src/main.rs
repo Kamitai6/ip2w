@@ -204,7 +204,7 @@ fn main() -> ! {
     let mut drive = false;
     let mut button_state = false;
 
-    let mut cf = ComplementaryFilter::new(0.1, DT);
+    let mut cf = ComplementaryFilter::new(0.5, DT);
 
     loop {
         // イベントがあるかチェック
@@ -228,10 +228,14 @@ fn main() -> ! {
                         button_state = button.is_low();
 
                         if drive {
-                            let target = -0.1;
-                            let value = pitch;
-                            let e_dot = gy;
-                            let m_sign = -1;
+                            // let target = -0.1;
+                            // let value = pitch;
+                            // let e_dot = gy;
+                            // let m_sign = -1;
+                            let target = 0.1;
+                            let value = state.pitch;
+                            let e_dot = -gy;
+                            let m_sign = 1;
 
                             let fb = smc.update(target - value, e_dot);
                             // let fb = pid.update(value, target);
