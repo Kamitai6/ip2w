@@ -130,9 +130,11 @@ fn main() -> ! {
     // Atom Motion motor driver
     let mut motion = atom_motion::AtomMotion::new(I2cRefCellDevice::new(&i2c1_ref_cell));
 
-    let mut smc = fb::smc::SuperTwistingSMC::new(DT, 30.0, 1500.0, 1.0)
-        .with_smoothing(0.2, 0.001)
-        .with_v_regulation(127.0, 3.0);
+    // let mut smc = fb::smc::SuperTwistingSMC::new(DT, 30.0, 1500.0, 1.0)
+    //     .with_smoothing(0.2, 0.001)
+    //     .with_v_regulation(127.0, 3.0);
+    use fb::smc::SimpleSMC;
+    let mut smc = SimpleSMC::new(DT, 127.0, 3.0, 0.05, 600.0);
 
     let lcd_spi = lcd_spi!(peripherals);
     let di = lcd_display_interface!(peripherals, lcd_spi);
@@ -187,17 +189,17 @@ fn main() -> ! {
                         button_state = button.is_low();
 
                         if drive {
-                            let value = state.pitch;
                             let target = 0.1;
+                            let value = state.pitch;
 
-                            let fb = smc.update(value, target);
+                            let fb = smc.update(target - value, -gy);
                             let ff = 0.0;
                             let output = ((fb + ff) as i8).clamp(-127, 127);
 
-                            if let Err(e) = motion.set_motor(atom_motion::MotorChannel::M1, output) {
+                            if let Err(e) = motion.set_motor(atom_motion::MotorChannel::M1, -output) {
                                 info!("Motor M1 error: {:?}", e);
                             }
-                            if let Err(e) = motion.set_motor(atom_motion::MotorChannel::M2, -output) {
+                            if let Err(e) = motion.set_motor(atom_motion::MotorChannel::M2, output) {
                                 info!("Motor M2 error: {:?}", e);
                             }
                         } else {
