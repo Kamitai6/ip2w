@@ -13,6 +13,7 @@ use critical_section::{Mutex, with};
 use defmt::info;
 use {esp_backtrace as _, esp_println as _};
 
+use libm::{atan2f};
 use esp_hal::{
     clock::CpuClock,
     dma::{DmaPriority, DmaRxBuf, DmaTxBuf, ExternalBurstConfig, DmaChannel, RegisterAccess},
@@ -62,6 +63,37 @@ const DT: f32 = 1.0 / FREQUENCY as f32;
 static TIMER0: Mutex<RefCell<Option<Timg>>> = Mutex::new(RefCell::new(None));
 pub static TIMER_COUNTER: Mutex<Cell<u32>> = Mutex::new(Cell::new(0));
 
+
+pub struct ComplementaryFilter {
+    angle: f32,
+    alpha: f32,
+    initialized: bool,
+}
+
+impl ComplementaryFilter {
+    pub fn new(tau: f32, dt: f32) -> Self {
+        Self {
+            angle: 0.0,
+            alpha: tau / (tau + dt),
+            initialized: false,
+        }
+    }
+
+    pub fn update(&mut self, accel_angle: f32, gyro_rate: f32, dt: f32) -> f32 {
+        if !self.initialized {
+            self.angle = accel_angle;
+            self.initialized = true;
+        } else {
+            self.angle = self.alpha * (self.angle + gyro_rate * dt) 
+                       + (1.0 - self.alpha) * accel_angle;
+        }
+        self.angle
+    }
+
+    pub fn reset(&mut self) {
+        self.initialized = false;
+    }
+}
 
 #[allow(
     clippy::large_stack_frames,
@@ -135,6 +167,7 @@ fn main() -> ! {
     //     .with_v_regulation(127.0, 3.0);
     use fb::smc::SimpleSMC;
     let mut smc = SimpleSMC::new(DT, 127.0, 3.0, 0.05, 600.0);
+    // let mut pid = fb::pid::PID::new(DT, 10.0, 130.0, 0.3);
 
     let lcd_spi = lcd_spi!(peripherals);
     let di = lcd_display_interface!(peripherals, lcd_spi);
@@ -171,6 +204,8 @@ fn main() -> ! {
     let mut drive = false;
     let mut button_state = false;
 
+    let mut cf = ComplementaryFilter::new(0.1, DT);
+
     loop {
         // イベントがあるかチェック
         if events::has_pending_events() {
@@ -183,23 +218,30 @@ fn main() -> ! {
                         let state = ekf.update_x_up(ax, ay, az, gx, gy, gz);
                         // info!("pitch: {}", state.pitch);
 
+                        let accel_angle = atan2f(-az, ax);  // 参考コードと同じ
+                        let pitch = cf.update(accel_angle, gy, DT);
+                        defmt::info!("accel_angle={} gy={} pitch={}", accel_angle, gy, pitch);
+
                         if button.is_low() && !button_state  {
                             drive = !drive;
                         }
                         button_state = button.is_low();
 
                         if drive {
-                            let target = 0.1;
-                            let value = state.pitch;
+                            let target = -0.1;
+                            let value = pitch;
+                            let e_dot = gy;
+                            let m_sign = -1;
 
-                            let fb = smc.update(target - value, -gy);
+                            let fb = smc.update(target - value, e_dot);
+                            // let fb = pid.update(value, target);
                             let ff = 0.0;
                             let output = ((fb + ff) as i8).clamp(-127, 127);
 
-                            if let Err(e) = motion.set_motor(atom_motion::MotorChannel::M1, -output) {
+                            if let Err(e) = motion.set_motor(atom_motion::MotorChannel::M1, -output * m_sign) {
                                 info!("Motor M1 error: {:?}", e);
                             }
-                            if let Err(e) = motion.set_motor(atom_motion::MotorChannel::M2, output) {
+                            if let Err(e) = motion.set_motor(atom_motion::MotorChannel::M2, output * m_sign) {
                                 info!("Motor M2 error: {:?}", e);
                             }
                         } else {
@@ -228,7 +270,7 @@ fn tg0_t0_handler() {
         if let Some(timer) = TIMER0.borrow_ref_mut(cs).as_mut() {
             timer.clear_interrupt();
 
-            let div = FREQUENCY;
+            let div = 1;
             if counter % div == 0 {
                 events::post_event(events::Event::MotionUpdate);
             }
@@ -236,6 +278,7 @@ fn tg0_t0_handler() {
             if counter % div == 0 {
                 events::post_event(events::Event::DisplayUpdate);
             }
+            TIMER_COUNTER.borrow(cs).set(counter + 1);
         }
     });
 }
