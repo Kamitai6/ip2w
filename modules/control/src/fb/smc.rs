@@ -45,7 +45,9 @@ impl SuperTwistingSMC {
         let sat_s = (s / self.epsilon).clamp(-1.0, 1.0);
         self.v = (expf(-self.v_leak * self.dt) * self.v - self.alpha * sat_s * self.dt)
             .clamp(-self.v_limit, self.v_limit);
-        -self.lambda * sqrtf(s.abs() + self.delta) * sat_s + self.v
+        let output = -self.lambda * sqrtf(s.abs() + self.delta) * sat_s + self.v;
+        defmt::info!("e={} s={} v={} u={}", err, s, self.v, output);
+        output
     }
     pub fn reset(&mut self) {
         self.v = 0.0;

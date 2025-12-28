@@ -4,7 +4,7 @@
 
 #![no_std]
 
-use core::f32::consts::PI;
+use core::f32::{EPSILON, consts::PI};
 use libm::{atan2f, asinf, sqrtf, cosf, sinf};
 
 const PI2: f32 = PI * 2.0;
@@ -31,22 +31,19 @@ impl Default for ContinuousAngle {
 
 impl ContinuousAngle {
     fn update(&mut self, angle: f32) -> f32 {
-        if !self.initialized {
+        if self.turns.abs() < EPSILON {
             self.prev = angle;
-            self.initialized = true;
-            return angle;
         }
-
-        // Detect wrap-around at ±π boundary
-        let diff = angle - self.prev;
-        if diff < -PI {
-            self.turns += 1.0;
-        } else if diff > PI {
-            self.turns -= 1.0;
+        if (angle * self.prev) < 0.0 {
+            let diff = angle - self.prev;
+            if diff < -PI {
+                self.turns += PI;
+            } else if diff > PI {
+                self.turns -= PI;
+            }
         }
         self.prev = angle;
-
-        angle + self.turns * PI2
+        angle + self.turns
     }
 
     fn reset(&mut self) {
@@ -294,20 +291,6 @@ impl ImuEkf {
             bias_variance: self.p[sym_idx(4, 4)],
             accel_valid,
         }
-    }
-
-    #[inline]
-    pub fn update_deg(
-        &mut self,
-        ax: f32, ay: f32, az: f32,
-        gx_deg: f32, gy_deg: f32, gz_deg: f32,
-    ) -> AttitudeState {
-        self.update(
-            ax, ay, az,
-            gx_deg * DEG_TO_RAD,
-            gy_deg * DEG_TO_RAD,
-            gz_deg * DEG_TO_RAD,
-        )
     }
 
     fn predict(&mut self, wx: f32, wy: f32, wz: f32) {
@@ -710,18 +693,21 @@ impl ImuEkf {
         }
     }
 
+    pub fn update_x_up(
+        &mut self,
+        ax: f32, ay: f32, az: f32,
+        gx: f32, gy: f32, gz: f32,
+    ) -> AttitudeState {
+        // X軸上 → Z軸上に変換
+        self.update(-az, ay, ax, -gz, gy, gx)
+    }
+
     // ===== Public API =====
     #[inline(always)]
     pub fn get_quaternion(&self) -> Quaternion { self.q }
 
     #[inline(always)]
     pub fn get_euler(&self) -> (f32, f32, f32) { self.q.to_euler() }
-
-    #[inline(always)]
-    pub fn get_degree(&self) -> (f32, f32, f32) { 
-        let e = self.get_euler();
-        (e.0 * RAD_TO_DEG, e.1 * RAD_TO_DEG, e.2 * RAD_TO_DEG)
-    }
 
     #[inline(always)]
     pub fn get_gyro_bias(&self) -> (f32, f32, f32) {
@@ -753,4 +739,14 @@ impl ImuEkf {
 
         self.reset_continuous();
     }
+}
+
+#[inline(always)]
+pub fn rad_to_degree((r, p, y): (f32, f32, f32)) -> (f32, f32, f32) { 
+    (r * RAD_TO_DEG, p * RAD_TO_DEG, y * RAD_TO_DEG)
+}
+
+#[inline(always)]
+pub fn degree_to_rad((r, p, y): (f32, f32, f32)) -> (f32, f32, f32) { 
+    (r * DEG_TO_RAD, p * DEG_TO_RAD, y * DEG_TO_RAD)
 }

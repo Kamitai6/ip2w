@@ -7,7 +7,7 @@
 )]
 #![deny(clippy::large_stack_frames)]
 
-use core::cell::{RefCell, Cell};
+use core::{cell::{RefCell, Cell}, f32::consts::PI};
 use alloc::borrow::ToOwned;
 use critical_section::{Mutex, with};
 use defmt::info;
@@ -29,7 +29,7 @@ use esp_hal::{
     main,
     handler,
 };
-use esp_bsp::{lcd_spi, lcd_backlight_init, lcd_display_interface, lcd_display, i2c_init, BoardType, DisplayConfig};
+use esp_bsp::{lcd_spi, lcd_backlight_init, lcd_display_interface, lcd_display, i2c0_init, i2c1_init, BoardType, DisplayConfig};
 use embedded_graphics::{
     prelude::{IntoStorage, RgbColor, Point, DrawTarget},
     pixelcolor::Rgb565,
@@ -75,22 +75,22 @@ fn main() -> ! {
     let mut delay = Delay::new();
     let timg0 = TimerGroup::new(peripherals.TIMG0);
 
-    // let mut button = Input::new(peripherals.GPIO41, InputConfig::default().with_pull(Pull::Up));
+    let mut button = Input::new(peripherals.GPIO41, InputConfig::default().with_pull(Pull::Up));
 
     //IR GPIO47
 
-    let i2c = i2c_init!(peripherals);
-    let i2c_ref_cell = RefCell::new(i2c);
+    let i2c0 = i2c0_init!(peripherals);
+    let i2c0_ref_cell = RefCell::new(i2c0);
 
     // LP5562
-    let mut lp5562 = lp5562::Lp5562::new(I2cRefCellDevice::new(&i2c_ref_cell));
+    let mut lp5562 = lp5562::Lp5562::new(I2cRefCellDevice::new(&i2c0_ref_cell));
     lp5562.init().unwrap();
     delay.delay_millis(10);
     lp5562.set_current(lp5562::Channel::White, 255).unwrap();
     lp5562.set_pwm(lp5562::Channel::White, 255).unwrap(); // 白色点灯
 
     // Initialize IMU
-    let mut imu = bmi270::Bmi270::new(I2cRefCellDevice::new(&i2c_ref_cell));
+    let mut imu = bmi270::Bmi270::new(I2cRefCellDevice::new(&i2c0_ref_cell));
     imu.init_with_config(
         bmi270::Config {
             acc_odr: bmi270::AccOdr::Hz400,
@@ -124,12 +124,15 @@ fn main() -> ! {
             ..Default::default()
     });
 
-    // Atom Motion motor driver
-    let mut motion = atom_motion::AtomMotion::new(I2cRefCellDevice::new(&i2c_ref_cell));
+    let i2c1 = i2c1_init!(peripherals);
+    let i2c1_ref_cell = RefCell::new(i2c1);
 
-    let smc = fb::smc::SuperTwistingSMC::new(DT, 10.0, 5.0, 2.0)
-        .with_smoothing(0.1, 0.01)
-        .with_v_regulation(1.0e+5, 0.0);
+    // Atom Motion motor driver
+    let mut motion = atom_motion::AtomMotion::new(I2cRefCellDevice::new(&i2c1_ref_cell));
+
+    let mut smc = fb::smc::SuperTwistingSMC::new(DT, 30.0, 1500.0, 1.0)
+        .with_smoothing(0.2, 0.001)
+        .with_v_regulation(127.0, 3.0);
 
     let lcd_spi = lcd_spi!(peripherals);
     let di = lcd_display_interface!(peripherals, lcd_spi);
@@ -163,6 +166,9 @@ fn main() -> ! {
         TIMER0.borrow_ref_mut(cs).replace(timer0);
     });
 
+    let mut drive = false;
+    let mut button_state = false;
+
     loop {
         // イベントがあるかチェック
         if events::has_pending_events() {
@@ -170,17 +176,38 @@ fn main() -> ! {
             while let Some(event) = events::get_event() {
                 match event {
                     events::Event::MotionUpdate => {
-                        let (ax, ay, az) = imu.read_accel().unwrap();  // g単位
-                        let (gx, gy, gz) = imu.read_gyro().unwrap();   // °/s単位
-                        let state = ekf.update_deg(ax, ay, az, gx, gy, gz);
-                        info!("pitch: {}", state.continuous_pitch);
-                        
-                        // let fb = smc.update(state.continuous_pitch, 0.0);
-                        // let ff = 0.0;
-                        // let output = ((fb + ff) as i8).clamp(-127, 127);
+                        let (ax, ay, az) = imu.read_accel().unwrap(); // g単位
+                        let (gx, gy, gz) = util::imu_ekf::degree_to_rad(imu.read_gyro().unwrap()); // rad/s単位
+                        let state = ekf.update_x_up(ax, ay, az, gx, gy, gz);
+                        // info!("pitch: {}", state.pitch);
 
-                        // motion.set_motor(atom_motion::MotorChannel::M1, -output).unwrap();
-                        // motion.set_motor(atom_motion::MotorChannel::M2, output).unwrap();
+                        if button.is_low() && !button_state  {
+                            drive = !drive;
+                        }
+                        button_state = button.is_low();
+
+                        if drive {
+                            let value = state.pitch;
+                            let target = 0.1;
+
+                            let fb = smc.update(value, target);
+                            let ff = 0.0;
+                            let output = ((fb + ff) as i8).clamp(-127, 127);
+
+                            if let Err(e) = motion.set_motor(atom_motion::MotorChannel::M1, output) {
+                                info!("Motor M1 error: {:?}", e);
+                            }
+                            if let Err(e) = motion.set_motor(atom_motion::MotorChannel::M2, -output) {
+                                info!("Motor M2 error: {:?}", e);
+                            }
+                        } else {
+                            if let Err(e) = motion.stop_motor(atom_motion::MotorChannel::M1) {
+                                info!("Motor M1 error: {:?}", e);
+                            }
+                            if let Err(e) = motion.stop_motor(atom_motion::MotorChannel::M2) {
+                                info!("Motor M2 error: {:?}", e);
+                            }
+                        }
                     }
                     events::Event::DisplayUpdate => {
 

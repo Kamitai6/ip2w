@@ -60,7 +60,7 @@ macro_rules! lcd_display {
 }
 
 #[macro_export]
-macro_rules! i2c_init {
+macro_rules! i2c0_init {
     ($peripherals:ident) => {{
         ::esp_hal::i2c::master::I2c::new(
             $peripherals.I2C0, 
@@ -72,7 +72,20 @@ macro_rules! i2c_init {
     }};
 }
 
+#[macro_export]
+macro_rules! i2c1_init {
+    ($peripherals:ident) => {{
+        ::esp_hal::i2c::master::I2c::new(
+            $peripherals.I2C1, 
+            ::esp_hal::i2c::master::Config::default()
+                .with_frequency(::esp_hal::time::Rate::from_khz(400))
+            ).unwrap()
+                .with_sda($peripherals.GPIO38)
+                .with_scl($peripherals.GPIO39)
+    }};
+}
+
 pub use {
-    i2c_init, lcd_backlight_init, lcd_display, lcd_display_interface,
+    i2c0_init, i2c1_init, lcd_backlight_init, lcd_display, lcd_display_interface,
     lcd_spi,
 };
