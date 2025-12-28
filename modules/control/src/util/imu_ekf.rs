@@ -7,8 +7,52 @@
 use core::f32::consts::PI;
 use libm::{atan2f, asinf, sqrtf, cosf, sinf};
 
+const PI2: f32 = PI * 2.0;
 const DEG_TO_RAD: f32 = PI / 180.0;
 const RAD_TO_DEG: f32 = 180.0 / PI;
+
+/// Continuous angle tracker (unwrapped)
+#[derive(Debug, Clone, Copy)]
+struct ContinuousAngle {
+    turns: f32,
+    prev: f32,
+    initialized: bool,
+}
+
+impl Default for ContinuousAngle {
+    fn default() -> Self {
+        Self {
+            turns: 0.0,
+            prev: 0.0,
+            initialized: false,
+        }
+    }
+}
+
+impl ContinuousAngle {
+    fn update(&mut self, angle: f32) -> f32 {
+        if !self.initialized {
+            self.prev = angle;
+            self.initialized = true;
+            return angle;
+        }
+
+        // Detect wrap-around at ±π boundary
+        let diff = angle - self.prev;
+        if diff < -PI {
+            self.turns += 1.0;
+        } else if diff > PI {
+            self.turns -= 1.0;
+        }
+        self.prev = angle;
+
+        angle + self.turns * PI2
+    }
+
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
+}
 
 /// EKF Configuration
 #[derive(Debug, Clone, Copy)]
@@ -98,15 +142,23 @@ impl Quaternion {
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct AttitudeState {
+    // 絶対角度（重力基準、-π〜π）
     pub roll: f32,
     pub pitch: f32,
     pub yaw: f32,
+    // 連続角度（ラップなし）
+    pub continuous_roll: f32,
+    pub continuous_pitch: f32,
+    pub continuous_yaw: f32,
+    // 角速度
     pub roll_rate: f32,
     pub pitch_rate: f32,
     pub yaw_rate: f32,
+    // バイアス
     pub gyro_bias_x: f32,
     pub gyro_bias_y: f32,
     pub gyro_bias_z: f32,
+    // その他
     pub quaternion: Quaternion,
     pub quat_variance: f32,
     pub bias_variance: f32,
@@ -132,6 +184,7 @@ pub struct ImuEkf {
     config: EkfConfig,
     last_gyro: [f32; 3],
     initialized: bool,
+    continuous: [ContinuousAngle; 3],
 }
 
 impl ImuEkf {
@@ -163,6 +216,7 @@ impl ImuEkf {
             config,
             last_gyro: [0.0; 3],
             initialized: false,
+            continuous: [ContinuousAngle::default(); 3],
         }
     }
 
@@ -220,12 +274,15 @@ impl ImuEkf {
         self.p[sym_idx(6, 6)] *= 1.0 - factor * 0.1;
     }
 
-    fn build_current_state(&self, accel_valid: bool) -> AttitudeState {
+    fn build_current_state(&mut self, accel_valid: bool) -> AttitudeState {
         let (roll, pitch, yaw) = self.q.to_euler();
         AttitudeState {
             roll,
             pitch,
             yaw,
+            continuous_roll: self.continuous[0].update(roll),
+            continuous_pitch: self.continuous[1].update(pitch),
+            continuous_yaw: self.continuous[2].update(yaw),
             roll_rate: self.last_gyro[0] - self.bias[0],
             pitch_rate: self.last_gyro[1] - self.bias[1],
             yaw_rate: self.last_gyro[2] - self.bias[2],
@@ -661,26 +718,21 @@ impl ImuEkf {
     pub fn get_euler(&self) -> (f32, f32, f32) { self.q.to_euler() }
 
     #[inline(always)]
-    pub fn get_roll(&self) -> f32 { self.get_euler().0 }
-
-    #[inline(always)]
-    pub fn get_pitch(&self) -> f32 { self.get_euler().1 }
-
-    #[inline(always)]
-    pub fn get_yaw(&self) -> f32 { self.get_euler().2 }
-
-    #[inline(always)]
-    pub fn get_roll_deg(&self) -> f32 { self.get_roll() * RAD_TO_DEG }
-
-    #[inline(always)]
-    pub fn get_pitch_deg(&self) -> f32 { self.get_pitch() * RAD_TO_DEG }
-
-    #[inline(always)]
-    pub fn get_yaw_deg(&self) -> f32 { self.get_yaw() * RAD_TO_DEG }
+    pub fn get_degree(&self) -> (f32, f32, f32) { 
+        let e = self.get_euler();
+        (e.0 * RAD_TO_DEG, e.1 * RAD_TO_DEG, e.2 * RAD_TO_DEG)
+    }
 
     #[inline(always)]
     pub fn get_gyro_bias(&self) -> (f32, f32, f32) {
         (self.bias[0], self.bias[1], self.bias[2])
+    }
+
+    #[inline(always)]
+    pub fn reset_continuous(&mut self) {
+        for c in &mut self.continuous {
+            c.reset();
+        }
     }
 
     pub fn reset(&mut self) {
@@ -698,18 +750,7 @@ impl ImuEkf {
         self.p[sym_idx(4,4)] = pb;
         self.p[sym_idx(5,5)] = pb;
         self.p[sym_idx(6,6)] = pb;
-    }
 
-    pub fn reset_yaw(&mut self) {
-        let (roll, pitch, _) = self.q.to_euler();
-        let cr = cosf(roll * 0.5);
-        let sr = sinf(roll * 0.5);
-        let cp = cosf(pitch * 0.5);
-        let sp = sinf(pitch * 0.5);
-        self.q.w = cr * cp;
-        self.q.x = sr * cp;
-        self.q.y = cr * sp;
-        self.q.z = -sr * sp;
-        self.q.normalize();
+        self.reset_continuous();
     }
 }

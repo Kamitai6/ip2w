@@ -1,34 +1,41 @@
-/// Velocity-type PID controller
-
-pub struct PIDController {
+/// Position-type PID controller with anti-windup
+pub struct PID {
     pub dt: f32,
     pub kp: f32,
     pub ki: f32,
     pub kd: f32,
-    pub control: f32,
+    pub integral_limit: f32,
+    integral: f32,
     prev_err: f32,
-    prev_prev_err: f32
 }
 
-impl PIDController {
+impl PID {
     pub fn new(dt: f32, kp: f32, ki: f32, kd: f32) -> Self {
         Self {
             dt,
             kp, ki, kd,
-            control: 0.0,
-            prev_err: 0.0,
-            prev_prev_err: 0.0
+            integral_limit: f32::INFINITY,
+            integral: 0.0,
+            prev_err: 0.0
         }
     }
 
-    pub fn update(&mut self, value: f32, target: f32) {
-        let err = target - value;
-        let diff_err = (err - self.prev_err) / self.dt; // Derivative of error
-        let diff_diff_err = (err - 2.0 * self.prev_err + self.prev_prev_err) / (self.dt * self.dt);   // Second-order derivative of error
-        let diff_control = self.kp * diff_err + self.ki * err + self.kd * diff_diff_err;
-        self.control += diff_control * self.dt;
+    pub fn with_integral_limits(mut self, limit: f32) -> Self {
+        self.integral_limit = limit;
+        self
+    }
 
-        self.prev_prev_err = self.prev_err;
+    pub fn update(&mut self, value: f32, target: f32) -> f32 {
+        let err = target - value;
+        self.integral = (self.integral + err * self.dt).clamp(-self.integral_limit, self.integral_limit);
+        let derivative = (err - self.prev_err) / self.dt;
         self.prev_err = err;
+
+        self.kp * err + self.ki * self.integral + self.kd * derivative
+    }
+
+    pub fn reset(&mut self) {
+        self.integral = 0.0;
+        self.prev_err = 0.0;
     }
 }

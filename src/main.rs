@@ -46,7 +46,7 @@ use embedded_hal_bus::{
     spi::ExclusiveDevice,
 };
 use atom::{atom_motion, bmi270, lp5562};
-use control::util;
+use control::{fb, util};
 
 mod events;
 
@@ -58,6 +58,7 @@ esp_bootloader_esp_idf::esp_app_desc!();
 
 const FREQUENCY: u32 = 500;
 const PERIOD_US: u64 = 1_000_000 / FREQUENCY as u64;
+const DT: f32 = 1.0 / FREQUENCY as f32;
 static TIMER0: Mutex<RefCell<Option<Timg>>> = Mutex::new(RefCell::new(None));
 pub static TIMER_COUNTER: Mutex<Cell<u32>> = Mutex::new(Cell::new(0));
 
@@ -111,9 +112,10 @@ fn main() -> ! {
     /* always calibration */
     imu.perform_gyr_foc(|us| delay.delay_micros(us)).unwrap();
 
+    // kalman
     let mut ekf = util::imu_ekf::ImuEkf::new(
         util::imu_ekf::EkfConfig {
-            dt: 1.0 / FREQUENCY as f32,
+            dt: DT,
             gyro_noise: 0.05,
             gyro_bias_noise: 0.0005,
             accel_noise: 0.15,
@@ -125,16 +127,20 @@ fn main() -> ! {
     // Atom Motion motor driver
     let mut motion = atom_motion::AtomMotion::new(I2cRefCellDevice::new(&i2c_ref_cell));
 
+    let smc = fb::smc::SuperTwistingSMC::new(DT, 10.0, 5.0, 2.0)
+        .with_smoothing(0.1, 0.01)
+        .with_v_regulation(1.0e+5, 0.0);
+
     let lcd_spi = lcd_spi!(peripherals);
     let di = lcd_display_interface!(peripherals, lcd_spi);
     let mut display = lcd_display!(peripherals, di, &mut delay).unwrap();
 
     display.clear(Rgb565::RED).unwrap();
-    delay.delay_millis(1000);
+    delay.delay_millis(10);
     display.clear(Rgb565::GREEN).unwrap();
-    delay.delay_millis(1000);
+    delay.delay_millis(10);
     display.clear(Rgb565::BLUE).unwrap();
-    delay.delay_millis(1000);
+    delay.delay_millis(10);
     display.clear(Rgb565::WHITE).unwrap();
 
     let _ = Text::with_alignment("HELLO WORLD!", Point::new(64, 64), MonoTextStyleBuilder::new().font(&FONT_10X20).text_color(RgbColor::BLACK).build(),  Alignment::Center)
@@ -166,15 +172,15 @@ fn main() -> ! {
                     events::Event::MotionUpdate => {
                         let (ax, ay, az) = imu.read_accel().unwrap();  // g単位
                         let (gx, gy, gz) = imu.read_gyro().unwrap();   // °/s単位
-                        // info!("gx:{}, gy:{}, gz:{}", gx, gy, gz);
-                        let _ = ekf.update_deg(ax, ay, az, gx, gy, gz);
-                        let r = ekf.get_roll_deg();
-                        let p = ekf.get_pitch_deg();
-                        let y = ekf.get_yaw_deg();
-                        info!("r:{}, p:{}, y:{}", r, p, y);
+                        let state = ekf.update_deg(ax, ay, az, gx, gy, gz);
+                        info!("pitch: {}", state.continuous_pitch);
+                        
+                        // let fb = smc.update(state.continuous_pitch, 0.0);
+                        // let ff = 0.0;
+                        // let output = ((fb + ff) as i8).clamp(-127, 127);
 
-                        // motion.set_motor(atom_motion::MotorChannel::M1, -pid.control).unwrap();
-                        // motion.set_motor(atom_motion::MotorChannel::M2, pid.control).unwrap();
+                        // motion.set_motor(atom_motion::MotorChannel::M1, -output).unwrap();
+                        // motion.set_motor(atom_motion::MotorChannel::M2, output).unwrap();
                     }
                     events::Event::DisplayUpdate => {
 
