@@ -63,35 +63,26 @@ const DT: f32 = 1.0 / FREQUENCY as f32;
 static TIMER0: Mutex<RefCell<Option<Timg>>> = Mutex::new(RefCell::new(None));
 pub static TIMER_COUNTER: Mutex<Cell<u32>> = Mutex::new(Cell::new(0));
 
+fn apply_deadzone(input_value: f32, input_limit: f32, output_min: f32, output_max: f32) -> f32 {
+    // 1. 入力を制限（安全装置）
+    let input = input_value.clamp(-input_limit, input_limit);
 
-pub struct ComplementaryFilter {
-    angle: f32,
-    alpha: f32,
-    initialized: bool,
-}
-
-impl ComplementaryFilter {
-    pub fn new(tau: f32, dt: f32) -> Self {
-        Self {
-            angle: 0.0,
-            alpha: tau / (tau + dt),
-            initialized: false,
-        }
+    // 2. ほぼ0なら、計算誤差が出ないように完全に0にする
+    if input.abs() < 0.001 {
+        return 0.0;
     }
 
-    pub fn update(&mut self, accel_angle: f32, gyro_rate: f32, dt: f32) -> f32 {
-        if !self.initialized {
-            self.angle = accel_angle;
-            self.initialized = true;
-        } else {
-            self.angle = self.alpha * (self.angle + gyro_rate * dt) 
-                       + (1.0 - self.alpha) * accel_angle;
-        }
-        self.angle
-    }
+    // 3. 比率を計算 (0.0 〜 1.0 の範囲になるので、絶対に桁あふれしない)
+    let ratio = input.abs() / input_limit;
 
-    pub fn reset(&mut self) {
-        self.initialized = false;
+    // 4. マッピング (線形補間)
+    let output_f32 = output_min + (ratio * (output_max - output_min));
+
+    // 5. 符号を復元
+    if input > 0.0 {
+        output_f32
+    } else {
+        -output_f32
     }
 }
 
@@ -107,7 +98,7 @@ fn main() -> ! {
     let mut delay = Delay::new();
     let timg0 = TimerGroup::new(peripherals.TIMG0);
 
-    let mut button = Input::new(peripherals.GPIO41, InputConfig::default().with_pull(Pull::Up));
+    let button = Input::new(peripherals.GPIO41, InputConfig::default().with_pull(Pull::Up));
 
     //IR GPIO47
 
@@ -162,12 +153,9 @@ fn main() -> ! {
     // Atom Motion motor driver
     let mut motion = atom_motion::AtomMotion::new(I2cRefCellDevice::new(&i2c1_ref_cell));
 
-    // let mut smc = fb::smc::SuperTwistingSMC::new(DT, 30.0, 1500.0, 1.0)
-    //     .with_smoothing(0.2, 0.001)
-    //     .with_v_regulation(127.0, 3.0);
-    use fb::smc::SimpleSMC;
-    let mut smc = SimpleSMC::new(DT, 127.0, 3.0, 0.05, 600.0);
-    // let mut pid = fb::pid::PID::new(DT, 10.0, 130.0, 0.3);
+    let mut smc = fb::smc::SuperTwistingSMC::new(DT, 200.0, 1500.0, 100.0)
+        .with_smoothing(0.001, 0.00001)
+        .with_v_regulation(800.0, 0.0);
 
     let lcd_spi = lcd_spi!(peripherals);
     let di = lcd_display_interface!(peripherals, lcd_spi);
@@ -203,8 +191,8 @@ fn main() -> ! {
 
     let mut drive = false;
     let mut button_state = false;
-
-    let mut cf = ComplementaryFilter::new(0.5, DT);
+    let mut m1_pwm = 0;
+    let mut m2_pwm = 0;
 
     loop {
         // イベントがあるかチェック
@@ -216,46 +204,31 @@ fn main() -> ! {
                         let (ax, ay, az) = imu.read_accel().unwrap(); // g単位
                         let (gx, gy, gz) = util::imu_ekf::degree_to_rad(imu.read_gyro().unwrap()); // rad/s単位
                         let state = ekf.update_x_up(ax, ay, az, gx, gy, gz);
-                        // info!("pitch: {}", state.pitch);
-
-                        let accel_angle = atan2f(-az, ax);  // 参考コードと同じ
-                        let pitch = cf.update(accel_angle, gy, DT);
-                        defmt::info!("accel_angle={} gy={} pitch={}", accel_angle, gy, pitch);
 
                         if button.is_low() && !button_state  {
                             drive = !drive;
                         }
                         button_state = button.is_low();
 
-                        if drive {
-                            // let target = -0.1;
-                            // let value = pitch;
-                            // let e_dot = gy;
-                            // let m_sign = -1;
-                            let target = 0.1;
-                            let value = state.pitch;
-                            let e_dot = -gy;
-                            let m_sign = 1;
-
-                            let fb = smc.update(target - value, e_dot);
-                            // let fb = pid.update(value, target);
-                            let ff = 0.0;
-                            let output = 35;//((fb + ff) as i8).clamp(-127, 127);
-
-                            if let Err(e) = motion.set_motor(atom_motion::MotorChannel::M1, -output * m_sign) {
-                                info!("Motor M1 error: {:?}", e);
-                            }
-                            if let Err(e) = motion.set_motor(atom_motion::MotorChannel::M2, output * m_sign) {
-                                info!("Motor M2 error: {:?}", e);
-                            }
-                        } else {
-                            if let Err(e) = motion.stop_motor(atom_motion::MotorChannel::M1) {
-                                info!("Motor M1 error: {:?}", e);
-                            }
-                            if let Err(e) = motion.stop_motor(atom_motion::MotorChannel::M2) {
-                                info!("Motor M2 error: {:?}", e);
-                            }
+                        if state.pitch.abs() > 1.0 {
+                            drive = false;
                         }
+
+                        if drive {
+                            let e = 0.16775 - state.pitch;
+                            let e_dot = 0.0 - gy;
+                            let fb = smc.update(e, e_dot);
+                            let ff = 0.0;
+                            let output = apply_deadzone(fb + ff, 1000.0, 30.0, 127.0) as i8;
+                            m1_pwm = output;
+                            m2_pwm = -output;
+                        } else {
+                            m1_pwm = 0;
+                            m2_pwm = 0;
+                            smc.reset();
+                        }
+                        let _ = motion.set_motor(atom_motion::MotorChannel::M1, m1_pwm);
+                        let _ = motion.set_motor(atom_motion::MotorChannel::M2, m2_pwm);
                     }
                     events::Event::DisplayUpdate => {
 
