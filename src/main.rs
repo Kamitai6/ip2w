@@ -240,7 +240,7 @@ fn main() -> ! {
                             let fb = smc.update(target - value, e_dot);
                             // let fb = pid.update(value, target);
                             let ff = 0.0;
-                            let output = ((fb + ff) as i8).clamp(-127, 127);
+                            let output = 35;//((fb + ff) as i8).clamp(-127, 127);
 
                             if let Err(e) = motion.set_motor(atom_motion::MotorChannel::M1, -output * m_sign) {
                                 info!("Motor M1 error: {:?}", e);
