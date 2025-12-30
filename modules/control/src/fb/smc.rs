@@ -49,7 +49,7 @@ impl SuperTwistingSMC {
             .clamp(-self.v_limit, self.v_limit);
         
         let output = -self.lambda * sqrtf(s.abs() + self.delta) * sat_s + self.v;
-        defmt::info!("e={} s={} v={} u={}", err, s, self.v, output);
+        // defmt::info!("e={} s={} v={} u={}", err, s, self.v, output);
         
         output
     }

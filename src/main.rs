@@ -119,7 +119,7 @@ fn main() -> ! {
             acc_odr: bmi270::AccOdr::Hz400,
             gyr_odr: bmi270::GyrOdr::Hz400,
             acc_range: bmi270::AccRange::G4,
-            gyr_range: bmi270::GyrRange::Dps250,
+            gyr_range: bmi270::GyrRange::Dps1000,
             acc_bwp: bmi270::AccBwp::Normal,
             gyr_bwp: bmi270::GyrBwp::Normal,
             perf_mode: bmi270::PerfMode::PerfOpt,
@@ -153,9 +153,14 @@ fn main() -> ! {
     // Atom Motion motor driver
     let mut motion = atom_motion::AtomMotion::new(I2cRefCellDevice::new(&i2c1_ref_cell));
 
-    let mut smc = fb::smc::SuperTwistingSMC::new(DT, 200.0, 1500.0, 100.0)
-        .with_smoothing(0.001, 0.00001)
-        .with_v_regulation(800.0, 0.0);
+    // ラムダ(P)は上げ過ぎると発散するから、するところまで上げて、しないギリギリまで下げる
+    // アルファ(I)は外乱が大きいほど高くしないといけないから、小さい値からはじめて、ギリギリ外乱に耐えられるまで上げる
+    // C(D)も上げ過ぎると発振するから、震えるまで上げて、しないギリギリまで下げる
+    // 多分、ラムダとCを適当な値にして、ラムダかCをいい感じに上げながら最適化できそうなほうから合わせて、
+    // 片方には強い感じまでやったら、アルファを上げてオフセットなどのモデル誤差を含めた外乱をすべて除けるようにしたら完成
+    let mut smc = fb::smc::SuperTwistingSMC::new(DT, 200.0, 1000.0, 25.0)
+        .with_smoothing(0.01, 0.00001)
+        .with_v_regulation(240.0, 0.0);
 
     let lcd_spi = lcd_spi!(peripherals);
     let di = lcd_display_interface!(peripherals, lcd_spi);
@@ -194,6 +199,7 @@ fn main() -> ! {
     let mut m1_pwm = 0;
     let mut m2_pwm = 0;
 
+    info!("Start!");
     loop {
         // イベントがあるかチェック
         if events::has_pending_events() {
@@ -210,7 +216,7 @@ fn main() -> ! {
                         }
                         button_state = button.is_low();
 
-                        if state.pitch.abs() > 1.0 {
+                        if state.roll.abs() > 1.0 || state.pitch.abs() > 1.0 {
                             drive = false;
                         }
 
@@ -219,7 +225,7 @@ fn main() -> ! {
                             let e_dot = 0.0 - gy;
                             let fb = smc.update(e, e_dot);
                             let ff = 0.0;
-                            let output = apply_deadzone(fb + ff, 1000.0, 30.0, 127.0) as i8;
+                            let output = apply_deadzone(fb + ff, 300.0, 30.0, 127.0) as i8; //(限界-5)程度にするのが最適っぽいな
                             m1_pwm = output;
                             m2_pwm = -output;
                         } else {
