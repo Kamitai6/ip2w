@@ -63,11 +63,12 @@ impl<I2C: I2c> Lp5562<I2C> {
     }
 
     /// Initialize the LP5562 with default settings
-    pub fn init(&mut self) -> Result<(), I2C::Error> {
+    pub fn init<D: FnMut(u32)>(&mut self, mut delay: D) -> Result<(), I2C::Error> {
         // Reset the device
         self.reset()?;
         // Enable chip
         self.enable()?;
+        delay(500); // T_su(ENABLE) > 488us
         // Use internal clock, set PWM frequency to 558Hz
         self.write_reg(reg::CONFIG, 0x01)?;
         // Map all LEDs to direct PWM control

@@ -87,8 +87,7 @@ fn main() -> ! {
 
     // LP5562
     let mut lp5562 = lp5562::Lp5562::new(I2cRefCellDevice::new(&i2c0_ref_cell));
-    lp5562.init().unwrap();
-    delay.delay_millis(10);
+    lp5562.init(&mut |us| delay.delay_micros(us)).unwrap();
     lp5562.set_current(lp5562::Channel::White, 255).unwrap();
     lp5562.set_pwm(lp5562::Channel::White, 255).unwrap(); // 白色点灯
 
@@ -96,10 +95,10 @@ fn main() -> ! {
     let mut imu = bmi270::Bmi270::new(I2cRefCellDevice::new(&i2c0_ref_cell));
     imu.init_with_config(
         bmi270::Config {
-            acc_odr: bmi270::AccOdr::Hz400,
-            gyr_odr: bmi270::GyrOdr::Hz400,
+            acc_odr: bmi270::AccOdr::Hz800,
+            gyr_odr: bmi270::GyrOdr::Hz800,
             acc_range: bmi270::AccRange::G4,
-            gyr_range: bmi270::GyrRange::Dps1000,
+            gyr_range: bmi270::GyrRange::Dps500,
             acc_bwp: bmi270::AccBwp::Normal,
             gyr_bwp: bmi270::GyrBwp::Normal,
             perf_mode: bmi270::PerfMode::PerfOpt,
@@ -138,8 +137,8 @@ fn main() -> ! {
     // C(D)も上げ過ぎると発振するから、震えるまで上げて、しないギリギリまで下げる
     // 多分、ラムダとCを適当な値にして、ラムダかCをいい感じに上げながら最適化できそうなほうから合わせて、
     // 片方には強い感じまでやったら、アルファを上げてオフセットなどのモデル誤差を含めた外乱をすべて除けるようにしたら完成
-    let mut smc = smc::SuperTwistingSMC::new(DT, 200.0, 800.0, 20.0)
-        .with_smoothing(0.01, 0.00001)
+    let mut smc = smc::SuperTwistingSMC::new(DT, 200.0, 800.0, 25.0)
+        .with_smoothing(0.1, 0.00001) //やっぱりこれもちゃんと設定しないとダメみたい。1.0や0.01よりも0.1のほうが明らかに良い
         .with_v_regulation(U_MAX * 0.8, 0.00001);
 
     let lcd_spi = lcd_spi!(peripherals);
@@ -179,6 +178,7 @@ fn main() -> ! {
     let mut m1_pwm = 0;
     let mut m2_pwm = 0;
 
+    let mut prev_instant: Option<Instant> = None;
     info!("Start!");
     loop {
         // イベントがあるかチェック
@@ -187,6 +187,17 @@ fn main() -> ! {
             while let Some(event) = events::get_event() {
                 match event {
                     events::Event::MotionUpdate => {
+                        let now = Instant::now();
+                        
+                        if let Some(prev) = prev_instant {
+                            let dt_us = (now - prev).as_micros();
+                            let dt = dt_us as f32 * 1e-6;         // 秒 [s]
+
+                            info!("dt = {} us ({} ms)", dt_us, dt * 1000.0);
+                        }
+
+                        prev_instant = Some(now);
+
                         let (ax, ay, az) = imu.read_accel().unwrap(); // g単位
                         let (gx, gy, gz) = imu_ekf::degree_to_rad(imu.read_gyro().unwrap()); // rad/s単位
                         let state = ekf.update_x_up(ax, ay, az, gx, gy, gz);
@@ -201,7 +212,7 @@ fn main() -> ! {
                         }
 
                         if drive {
-                            let e = 0.16 - state.pitch;
+                            let e = 0.14 - state.pitch;
                             let e_dot = 0.0 - gy;
                             let fb = smc.update(e, e_dot);
                             let ff = 0.0;
