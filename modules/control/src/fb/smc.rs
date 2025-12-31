@@ -20,9 +20,9 @@ impl SuperTwistingSMC {
             alpha,
             c,
             epsilon: 0.1,
-            delta: 0.01,
+            delta: 0.00001,
             v_limit: f32::INFINITY,
-            v_leak: 0.0,
+            v_leak: 0.00001,
             v: 0.0,
             prev_err: 0.0,
         }

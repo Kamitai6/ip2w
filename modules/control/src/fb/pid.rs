@@ -25,8 +25,8 @@ impl PID {
         self
     }
 
-    pub fn update(&mut self, value: f32, target: f32) -> f32 {
-        let err = target - value;
+    /// let err = target - value;
+    pub fn update(&mut self, err: f32) -> f32 {
         self.integral = (self.integral + err * self.dt).clamp(-self.integral_limit, self.integral_limit);
         let derivative = (err - self.prev_err) / self.dt;
         self.prev_err = err;

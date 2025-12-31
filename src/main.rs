@@ -13,20 +13,12 @@ use critical_section::{Mutex, with};
 use defmt::info;
 use {esp_backtrace as _, esp_println as _};
 
-use libm::{atan2f};
 use esp_hal::{
     clock::CpuClock,
-    dma::{DmaPriority, DmaRxBuf, DmaTxBuf, ExternalBurstConfig, DmaChannel, RegisterAccess},
-    peripherals::Peripherals,
     gpio::{Event, Input, InputConfig, Io, Level, Output, OutputConfig, Pull},
-    spi::{
-        master::{Config as SpiCfg, Spi},  
-        Mode,
-    },
     delay::Delay,
     time::{Duration, Instant, Rate},
     timer::{Timer, timg::{Timer as Timg, TimerGroup}},
-    i2c::master::{I2c, Config as I2cCfg},
     main,
     handler,
 };
@@ -41,13 +33,9 @@ use embedded_graphics::{
     text::{Alignment, Text},
     Drawable,
 };
-use embedded_hal::i2c::{I2c as eh_I2c};
-use embedded_hal_bus::{
-    i2c::{RefCellDevice as I2cRefCellDevice},
-    spi::ExclusiveDevice,
-};
+use embedded_hal_bus::i2c::{RefCellDevice as I2cRefCellDevice};
 use atom::{atom_motion, bmi270, lp5562};
-use control::{fb::smc, util::{imu_ekf, deadzone}};
+use control::{fb::smc, ff::gravity, util::{imu_ekf, deadzone}};
 
 mod events;
 
@@ -141,6 +129,8 @@ fn main() -> ! {
         .with_smoothing(0.1, 0.00001) //やっぱりこれもちゃんと設定しないとダメみたい。1.0や0.01よりも0.1のほうが明らかに良い
         .with_v_regulation(U_MAX * 0.8, 0.00001);
 
+    let mut gravity = gravity::GravityCompensator::new(0.1, 0.035, 500.0);
+
     let lcd_spi = lcd_spi!(peripherals);
     let di = lcd_display_interface!(peripherals, lcd_spi);
     let mut display = lcd_display!(peripherals, di, &mut delay).unwrap();
@@ -178,7 +168,6 @@ fn main() -> ! {
     let mut m1_pwm = 0;
     let mut m2_pwm = 0;
 
-    let mut prev_instant: Option<Instant> = None;
     info!("Start!");
     loop {
         // イベントがあるかチェック
@@ -187,17 +176,6 @@ fn main() -> ! {
             while let Some(event) = events::get_event() {
                 match event {
                     events::Event::MotionUpdate => {
-                        let now = Instant::now();
-                        
-                        if let Some(prev) = prev_instant {
-                            let dt_us = (now - prev).as_micros();
-                            let dt = dt_us as f32 * 1e-6;         // 秒 [s]
-
-                            info!("dt = {} us ({} ms)", dt_us, dt * 1000.0);
-                        }
-
-                        prev_instant = Some(now);
-
                         let (ax, ay, az) = imu.read_accel().unwrap(); // g単位
                         let (gx, gy, gz) = imu_ekf::degree_to_rad(imu.read_gyro().unwrap()); // rad/s単位
                         let state = ekf.update_x_up(ax, ay, az, gx, gy, gz);
@@ -212,10 +190,11 @@ fn main() -> ! {
                         }
 
                         if drive {
-                            let e = 0.14 - state.pitch;
+                            let now_angle = state.pitch - 0.14;
+                            let e = 0.0 - now_angle;
                             let e_dot = 0.0 - gy;
                             let fb = smc.update(e, e_dot);
-                            let ff = 0.0;
+                            let ff = -gravity.update(now_angle);
                             let output = deadzone::apply_deadzone(fb + ff, U_MAX, 30.0, atom_motion::MOTOR_SPEED_MAX as f32) as i8; //(限界-5)程度にするのが最適っぽいな
                             m1_pwm = output;
                             m2_pwm = -output;
