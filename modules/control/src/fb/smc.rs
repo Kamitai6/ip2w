@@ -1,16 +1,16 @@
 /// Super Twisting Sliding Mode Controller for second-order systems
-use libm::{sqrtf, expf};
+use libm::{sqrtf};
 pub struct SuperTwistingSMC {
     pub dt: f32,        // [s] time step
-    pub lambda: f32,    // gain for sqrt term
-    pub alpha: f32,     // gain for integral term
-    pub c: f32,         // [1/s] sliding surface parameter
-    pub epsilon: f32,   // [1/s] boundary layer width (same unit as s)
-    pub delta: f32,     // [1/s^2] regularization for sqrt (same unit as |s|)
-    pub v_limit: f32,   // integral term limit
-    pub v_leak: f32,    // [1/s] decay rate (time constant = 1/v_leak)
-    v: f32,
-    prev_err: f32,
+    pub lambda: f32,    // [出力/√(rad/s)] gain for sqrt term (algebraic)
+    pub alpha: f32,     // [出力/s] integral rate (multiplied by dt internally)
+    pub c: f32,         // [1/s] sliding surface parameter (algebraic)
+    pub epsilon: f32,   // [rad/s] boundary layer width
+    pub delta: f32,     // [rad/s] regularization for sqrt
+    pub v_limit: f32,   // [出力] integral term limit
+    pub v_leak: f32,    // [1/s] decay rate (multiplied by dt internally)
+    v: f32,             // [出力] integral state
+    prev_err: f32,      // [rad] previous error
 }
 impl SuperTwistingSMC {
     pub fn new(dt: f32, lambda: f32, alpha: f32, c: f32) -> Self {
@@ -45,7 +45,7 @@ impl SuperTwistingSMC {
         let s = err_dot + self.c * err;
         let sat_s = (s / self.epsilon).clamp(-1.0, 1.0);
         
-        self.v = (expf(-self.v_leak * self.dt) * self.v - self.alpha * sat_s * self.dt)
+        self.v = ((1.0 - self.v_leak * self.dt) * self.v - self.alpha * sat_s * self.dt)
             .clamp(-self.v_limit, self.v_limit);
         
         let output = -self.lambda * sqrtf(s.abs() + self.delta) * sat_s + self.v;

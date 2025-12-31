@@ -64,11 +64,6 @@ impl<I2C: I2c> AtomMotion<I2C> {
         self.write_reg(reg, speed as u8)
     }
 
-    /// Stop a DC motor
-    pub fn stop_motor(&mut self, channel: MotorChannel) -> Result<(), I2C::Error> {
-        self.set_motor(channel, 0)
-    }
-
     /// Set servo angle
     /// 
     /// # Arguments

@@ -47,7 +47,7 @@ use embedded_hal_bus::{
     spi::ExclusiveDevice,
 };
 use atom::{atom_motion, bmi270, lp5562};
-use control::{fb, util};
+use control::{fb::smc, util::{imu_ekf, deadzone}};
 
 mod events;
 
@@ -63,28 +63,6 @@ const DT: f32 = 1.0 / FREQUENCY as f32;
 static TIMER0: Mutex<RefCell<Option<Timg>>> = Mutex::new(RefCell::new(None));
 pub static TIMER_COUNTER: Mutex<Cell<u32>> = Mutex::new(Cell::new(0));
 
-fn apply_deadzone(input_value: f32, input_limit: f32, output_min: f32, output_max: f32) -> f32 {
-    // 1. 入力を制限（安全装置）
-    let input = input_value.clamp(-input_limit, input_limit);
-
-    // 2. ほぼ0なら、計算誤差が出ないように完全に0にする
-    if input.abs() < 0.001 {
-        return 0.0;
-    }
-
-    // 3. 比率を計算 (0.0 〜 1.0 の範囲になるので、絶対に桁あふれしない)
-    let ratio = input.abs() / input_limit;
-
-    // 4. マッピング (線形補間)
-    let output_f32 = output_min + (ratio * (output_max - output_min));
-
-    // 5. 符号を復元
-    if input > 0.0 {
-        output_f32
-    } else {
-        -output_f32
-    }
-}
 
 #[allow(
     clippy::large_stack_frames,
@@ -136,8 +114,8 @@ fn main() -> ! {
     imu.perform_gyr_foc(|us| delay.delay_micros(us)).unwrap();
 
     // kalman
-    let mut ekf = util::imu_ekf::ImuEkf::new(
-        util::imu_ekf::EkfConfig {
+    let mut ekf = imu_ekf::ImuEkf::new(
+        imu_ekf::EkfConfig {
             dt: DT,
             gyro_noise: 0.05,
             gyro_bias_noise: 0.0005,
@@ -158,9 +136,9 @@ fn main() -> ! {
     // C(D)も上げ過ぎると発振するから、震えるまで上げて、しないギリギリまで下げる
     // 多分、ラムダとCを適当な値にして、ラムダかCをいい感じに上げながら最適化できそうなほうから合わせて、
     // 片方には強い感じまでやったら、アルファを上げてオフセットなどのモデル誤差を含めた外乱をすべて除けるようにしたら完成
-    let mut smc = fb::smc::SuperTwistingSMC::new(DT, 200.0, 1000.0, 25.0)
+    let mut smc = smc::SuperTwistingSMC::new(DT, 200.0, 1000.0, 25.0)
         .with_smoothing(0.01, 0.00001)
-        .with_v_regulation(240.0, 0.0);
+        .with_v_regulation(240.0, 0.00001);
 
     let lcd_spi = lcd_spi!(peripherals);
     let di = lcd_display_interface!(peripherals, lcd_spi);
@@ -208,7 +186,7 @@ fn main() -> ! {
                 match event {
                     events::Event::MotionUpdate => {
                         let (ax, ay, az) = imu.read_accel().unwrap(); // g単位
-                        let (gx, gy, gz) = util::imu_ekf::degree_to_rad(imu.read_gyro().unwrap()); // rad/s単位
+                        let (gx, gy, gz) = imu_ekf::degree_to_rad(imu.read_gyro().unwrap()); // rad/s単位
                         let state = ekf.update_x_up(ax, ay, az, gx, gy, gz);
 
                         if button.is_low() && !button_state  {
@@ -225,7 +203,7 @@ fn main() -> ! {
                             let e_dot = 0.0 - gy;
                             let fb = smc.update(e, e_dot);
                             let ff = 0.0;
-                            let output = apply_deadzone(fb + ff, 300.0, 30.0, 127.0) as i8; //(限界-5)程度にするのが最適っぽいな
+                            let output = deadzone::apply_deadzone(fb + ff, 300.0, 30.0, 127.0) as i8; //(限界-5)程度にするのが最適っぽいな
                             m1_pwm = output;
                             m2_pwm = -output;
                         } else {
