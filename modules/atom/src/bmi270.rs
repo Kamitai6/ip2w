@@ -2,61 +2,6 @@
 //!
 //! A `no_std` compatible driver for the Bosch BMI270 Inertial Measurement Unit.
 //! Supports accelerometer and gyroscope with configurable ranges and ODR.
-//!
-//! # Basic Example
-//!
-//! ```no_run
-//! use bmi270::{Bmi270, Config, AccRange, GyrRange};
-//!
-//! // Create driver with I2C bus
-//! let mut imu = Bmi270::new(i2c);
-//!
-//! // Initialize with default config
-//! imu.init(|us| delay.delay_us(us)).unwrap();
-//!
-//! // Or with custom config
-//! let config = Config {
-//!     acc_range: AccRange::G8,
-//!     gyr_range: GyrRange::Dps1000,
-//!     ..Default::default()
-//! };
-//! imu.init_with_config(config, &mut |us| delay.delay_us(us)).unwrap();
-//!
-//! // Read data
-//! let (ax, ay, az) = imu.read_accel().unwrap();  // in g
-//! let (gx, gy, gz) = imu.read_gyro().unwrap();   // in °/s
-//! let temp = imu.read_temperature().unwrap();    // in °C
-//!
-//! // Or read raw values
-//! let raw = imu.read_imu_raw().unwrap();
-//! println!("Accel: x={}, y={}, z={}", raw.accel.x, raw.accel.y, raw.accel.z);
-//! ```
-//!
-//! # FOC (Fast Offset Compensation) Example
-//!
-//! ```no_run
-//! use bmi270::{Bmi270, FocAccConfig};
-//!
-//! let mut imu = Bmi270::new(i2c);
-//! imu.init(|us| delay.delay_us(us)).unwrap();
-//!
-//! // Place sensor flat with Z-axis pointing up, keep it completely still
-//! // Then perform calibration:
-//! imu.perform_foc(FocAccConfig::z_up(), |us| delay.delay_us(us)).unwrap();
-//!
-//! // Offsets are now applied automatically
-//! let (ax, ay, az) = imu.read_accel().unwrap();
-//! // Should read approximately (0, 0, 1) g
-//!
-//! // You can save offsets for next boot:
-//! let acc_offset = imu.read_acc_offset();  // (i32, i32, i32)
-//! let gyr_offset = imu.read_gyr_offset();
-//! // Save to flash...
-//!
-//! // And restore later:
-//! imu.write_acc_offset(acc_offset);
-//! imu.write_gyr_offset(gyr_offset);
-//! ```
 
 use embedded_hal::i2c::I2c;
 
@@ -158,30 +103,18 @@ mod cmd {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[repr(u8)]
 pub enum AccOdr {
-    /// 0.78 Hz
     Hz0_78 = 0x01,
-    /// 1.56 Hz
     Hz1_56 = 0x02,
-    /// 3.12 Hz
     Hz3_12 = 0x03,
-    /// 6.25 Hz
     Hz6_25 = 0x04,
-    /// 12.5 Hz
     Hz12_5 = 0x05,
-    /// 25 Hz
     Hz25 = 0x06,
-    /// 50 Hz
     Hz50 = 0x07,
-    /// 100 Hz (default)
     #[default]
     Hz100 = 0x08,
-    /// 200 Hz
     Hz200 = 0x09,
-    /// 400 Hz
     Hz400 = 0x0A,
-    /// 800 Hz
     Hz800 = 0x0B,
-    /// 1600 Hz
     Hz1600 = 0x0C,
 }
 
@@ -191,7 +124,7 @@ pub enum AccOdr {
 pub enum AccRange {
     /// ±2g
     G2 = 0x00,
-    /// ±4g (default)
+    /// ±4g
     #[default]
     G4 = 0x01,
     /// ±8g
@@ -201,7 +134,7 @@ pub enum AccRange {
 }
 
 impl AccRange {
-    /// Get the sensitivity in LSB/g
+    /// Returns sensitivity in LSB/g
     pub fn sensitivity(self) -> f32 {
         match self {
             AccRange::G2 => 16384.0,
@@ -216,22 +149,14 @@ impl AccRange {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[repr(u8)]
 pub enum GyrOdr {
-    /// 25 Hz
     Hz25 = 0x06,
-    /// 50 Hz
     Hz50 = 0x07,
-    /// 100 Hz
     Hz100 = 0x08,
-    /// 200 Hz (default)
     #[default]
     Hz200 = 0x09,
-    /// 400 Hz
     Hz400 = 0x0A,
-    /// 800 Hz
     Hz800 = 0x0B,
-    /// 1600 Hz
     Hz1600 = 0x0C,
-    /// 3200 Hz
     Hz3200 = 0x0D,
 }
 
@@ -239,7 +164,7 @@ pub enum GyrOdr {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[repr(u8)]
 pub enum GyrRange {
-    /// ±2000 °/s (default)
+    /// ±2000 °/s
     #[default]
     Dps2000 = 0x00,
     /// ±1000 °/s
@@ -253,7 +178,7 @@ pub enum GyrRange {
 }
 
 impl GyrRange {
-    /// Get the sensitivity in LSB/(°/s)
+    /// Returns sensitivity in LSB/(°/s)
     pub fn sensitivity(self) -> f32 {
         match self {
             GyrRange::Dps2000 => 16.4,
@@ -269,14 +194,10 @@ impl GyrRange {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[repr(u8)]
 pub enum AccBwp {
-    /// OSR4 averaging
     Osr4 = 0x00,
-    /// OSR2 averaging
     Osr2 = 0x01,
-    /// Normal mode (default)
     #[default]
     Normal = 0x02,
-    /// CIC averaging
     Cic = 0x03,
 }
 
@@ -284,11 +205,8 @@ pub enum AccBwp {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[repr(u8)]
 pub enum GyrBwp {
-    /// OSR4 mode
     Osr4 = 0x00,
-    /// OSR2 mode
     Osr2 = 0x01,
-    /// Normal mode (default)
     #[default]
     Normal = 0x02,
 }
@@ -299,7 +217,7 @@ pub enum GyrBwp {
 pub enum PerfMode {
     /// CIC averaging (power optimized)
     PowerOpt = 0x00,
-    /// Continuous filter (performance optimized, default)
+    /// Continuous filter (performance optimized)
     #[default]
     PerfOpt = 0x01,
 }
@@ -311,23 +229,16 @@ pub enum PerfMode {
 /// Accelerometer FOC axis configuration
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FocAccAxis {
-    /// Disable FOC for this axis
     Disable,
-    /// Axis pointing to +1g (e.g., Z-up)
+    /// Axis pointing to +1g
     Plus1g,
-    /// Axis pointing to -1g (e.g., Z-down)
+    /// Axis pointing to -1g
     Minus1g,
     /// Axis pointing to 0g (horizontal)
     Zero,
 }
 
 /// FOC configuration for accelerometer
-///
-/// Specify the expected orientation during calibration.
-/// For example, if the sensor is flat with Z pointing up:
-/// - x_axis: Zero (horizontal)
-/// - y_axis: Zero (horizontal)  
-/// - z_axis: Plus1g (pointing up against gravity)
 #[derive(Debug, Clone, Copy)]
 pub struct FocAccConfig {
     pub x_axis: FocAccAxis,
@@ -359,7 +270,7 @@ impl FocAccConfig {
 // Data Types
 // ============================================================================
 
-/// Raw accelerometer data
+/// Raw accelerometer data [LSB]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct AccelData {
     pub x: i16,
@@ -367,7 +278,7 @@ pub struct AccelData {
     pub z: i16,
 }
 
-/// Raw gyroscope data
+/// Raw gyroscope data [LSB]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct GyroData {
     pub x: i16,
@@ -375,7 +286,7 @@ pub struct GyroData {
     pub z: i16,
 }
 
-/// Combined IMU data
+/// Combined IMU data [LSB]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ImuData {
     pub accel: AccelData,
@@ -385,13 +296,9 @@ pub struct ImuData {
 /// Driver errors
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error<E> {
-    /// I2C communication error
     I2c(E),
-    /// Invalid chip ID
     InvalidChipId(u8),
-    /// Initialization failed
     InitFailed,
-    /// Configuration error
     ConfigError,
 }
 
@@ -433,8 +340,9 @@ pub struct Bmi270<I2C> {
     addr: u8,
     acc_range: AccRange,
     gyr_range: GyrRange,
-    // Software offset compensation
+    /// Software offset [LSB]
     acc_offset: (i32, i32, i32),
+    /// Software offset [LSB]
     gyr_offset: (i32, i32, i32),
 }
 
@@ -458,16 +366,16 @@ impl<I2C: I2c> Bmi270<I2C> {
 
     /// Initialize the BMI270 with default configuration
     ///
-    /// This performs a soft reset, verifies chip ID, loads the config file,
-    /// and configures accelerometer and gyroscope with default settings.
-    ///
     /// # Arguments
-    /// * `delay` - Delay provider for timing requirements
+    /// * `delay` - Delay function taking microseconds [µs]
     pub fn init<D: FnMut(u32)>(&mut self, mut delay: D) -> Result<(), Error<I2C::Error>> {
         self.init_with_config(Config::default(), &mut delay)
     }
 
     /// Initialize the BMI270 with custom configuration
+    ///
+    /// # Arguments
+    /// * `delay` - Delay function taking microseconds [µs]
     pub fn init_with_config<D: FnMut(u32)>(
         &mut self,
         config: Config,
@@ -475,7 +383,7 @@ impl<I2C: I2c> Bmi270<I2C> {
     ) -> Result<(), Error<I2C::Error>> {
         // Soft reset
         self.soft_reset()?;
-        delay(2000); // Wait 2ms after reset
+        delay(2000); // 2ms
 
         // Verify chip ID
         let chip_id = self.read_chip_id()?;
@@ -491,7 +399,7 @@ impl<I2C: I2c> Bmi270<I2C> {
         self.load_config_file(delay)?;
 
         // Verify initialization status
-        delay(20000); // Wait for initialization
+        delay(20000); // 20ms
         let status = self.read_reg(reg::INTERNAL_STATUS)?;
         if (status & 0x0F) != 0x01 {
             return Err(Error::InitFailed);
@@ -540,7 +448,7 @@ impl<I2C: I2c> Bmi270<I2C> {
 
         // Complete config load
         self.write_reg(reg::INIT_CTRL, 0x01)?;
-        delay(200000); // Wait 200ms for initialization
+        delay(200000); // 200ms
 
         Ok(())
     }
@@ -574,7 +482,7 @@ impl<I2C: I2c> Bmi270<I2C> {
         self.read_reg(reg::CHIP_ID)
     }
 
-    /// Read raw accelerometer data (with offset compensation applied)
+    /// Read raw accelerometer data with offset compensation [LSB]
     pub fn read_accel_raw(&mut self) -> Result<AccelData, I2C::Error> {
         let raw = self.read_accel_raw_internal()?;
         Ok(AccelData {
@@ -584,7 +492,7 @@ impl<I2C: I2c> Bmi270<I2C> {
         })
     }
 
-    /// Read raw accelerometer data (without offset compensation)
+    /// Read raw accelerometer data without offset compensation [LSB]
     fn read_accel_raw_internal(&mut self) -> Result<AccelData, I2C::Error> {
         let mut buf = [0u8; 6];
         self.read_regs(reg::ACC_X_LSB, &mut buf)?;
@@ -596,7 +504,7 @@ impl<I2C: I2c> Bmi270<I2C> {
         })
     }
 
-    /// Read raw gyroscope data (with offset compensation applied)
+    /// Read raw gyroscope data with offset compensation [LSB]
     pub fn read_gyro_raw(&mut self) -> Result<GyroData, I2C::Error> {
         let raw = self.read_gyro_raw_internal()?;
         Ok(GyroData {
@@ -606,7 +514,7 @@ impl<I2C: I2c> Bmi270<I2C> {
         })
     }
 
-    /// Read raw gyroscope data (without offset compensation)
+    /// Read raw gyroscope data without offset compensation [LSB]
     fn read_gyro_raw_internal(&mut self) -> Result<GyroData, I2C::Error> {
         let mut buf = [0u8; 6];
         self.read_regs(reg::GYR_X_LSB, &mut buf)?;
@@ -618,7 +526,7 @@ impl<I2C: I2c> Bmi270<I2C> {
         })
     }
 
-    /// Read both accelerometer and gyroscope data (with offset compensation)
+    /// Read both accelerometer and gyroscope data with offset compensation [LSB]
     pub fn read_imu_raw(&mut self) -> Result<ImuData, I2C::Error> {
         let mut buf = [0u8; 12];
         self.read_regs(reg::ACC_X_LSB, &mut buf)?;
@@ -637,7 +545,7 @@ impl<I2C: I2c> Bmi270<I2C> {
         })
     }
 
-    /// Read accelerometer data in g
+    /// Read accelerometer data [g]
     pub fn read_accel(&mut self) -> Result<(f32, f32, f32), I2C::Error> {
         let raw = self.read_accel_raw()?;
         let sens = self.acc_range.sensitivity();
@@ -648,7 +556,7 @@ impl<I2C: I2c> Bmi270<I2C> {
         ))
     }
 
-    /// Read gyroscope data in degrees per second
+    /// Read gyroscope data [°/s]
     pub fn read_gyro(&mut self) -> Result<(f32, f32, f32), I2C::Error> {
         let raw = self.read_gyro_raw()?;
         let sens = self.gyr_range.sensitivity();
@@ -659,16 +567,15 @@ impl<I2C: I2c> Bmi270<I2C> {
         ))
     }
 
-    /// Read temperature in Celsius
+    /// Read temperature [°C]
     pub fn read_temperature(&mut self) -> Result<f32, I2C::Error> {
         let mut buf = [0u8; 2];
         self.read_regs(reg::TEMPERATURE_LSB, &mut buf)?;
         let raw = i16::from_le_bytes([buf[0], buf[1]]);
-        // Temperature formula from datasheet
         Ok(raw as f32 / 512.0 + 23.0)
     }
 
-    /// Read sensor time (24-bit counter at 39.0625 µs resolution)
+    /// Read sensor time (24-bit counter, 39.0625 µs resolution)
     pub fn read_sensor_time(&mut self) -> Result<u32, I2C::Error> {
         let mut buf = [0u8; 3];
         self.read_regs(reg::SENSORTIME_0, &mut buf)?;
@@ -735,22 +642,11 @@ impl<I2C: I2c> Bmi270<I2C> {
 
     /// Perform accelerometer offset calibration (software-based)
     ///
-    /// This performs a software-based calibration by averaging multiple samples
-    /// and storing offset values internally. Offsets are applied automatically
-    /// when reading accelerometer data.
+    /// Sensor must be stationary in a known orientation during calibration.
+    /// Takes ~1s to complete (1000 samples).
     ///
-    /// The sensor must be stationary in a known orientation during calibration.
-    ///
-    /// # Example
-    /// ```no_run
-    /// // Place sensor flat with Z-axis pointing up, then:
-    /// imu.perform_acc_foc(FocAccConfig::z_up(), |us| delay.delay_us(us))?;
-    /// ```
-    ///
-    /// # Requirements
-    /// - Sensor must be stationary
-    /// - Accelerometer must be enabled
-    /// - Takes ~500ms to complete (50 samples at 100Hz)
+    /// # Arguments
+    /// * `delay` - Delay function taking microseconds [µs]
     pub fn perform_acc_foc<D: FnMut(u32)>(
         &mut self,
         config: FocAccConfig,
@@ -762,14 +658,14 @@ impl<I2C: I2c> Bmi270<I2C> {
         let pwr = self.read_reg(reg::PWR_CTRL)?;
         if (pwr & pwr_ctrl::ACC_EN) == 0 {
             self.write_reg(reg::PWR_CTRL, pwr | pwr_ctrl::ACC_EN)?;
-            delay(50000); // Wait for accel to start
+            delay(50000); // 50ms
         }
 
         // Disable advanced power save
         self.write_reg(reg::PWR_CONF, 0x00)?;
         delay(1000);
 
-        // Expected values based on orientation (in LSB for current range)
+        // Expected values based on orientation [LSB]
         let sensitivity = self.acc_range.sensitivity();
         let expected_x: i32 = match config.x_axis {
             FocAccAxis::Plus1g => sensitivity as i32,
@@ -793,7 +689,7 @@ impl<I2C: I2c> Bmi270<I2C> {
         let mut sum_z: i32 = 0;
 
         for _ in 0..NUM_SAMPLES {
-            delay(1000); // 1ms between samples
+            delay(1000); // 1ms
             let raw = self.read_accel_raw_internal()?;
             sum_x += raw.x as i32;
             sum_y += raw.y as i32;
@@ -804,7 +700,7 @@ impl<I2C: I2c> Bmi270<I2C> {
         let avg_y = sum_y / NUM_SAMPLES;
         let avg_z = sum_z / NUM_SAMPLES;
 
-        // Store offset (what to subtract to get expected value)
+        // Store offset [LSB]
         self.acc_offset = (avg_x - expected_x, avg_y - expected_y, avg_z - expected_z);
 
         Ok(())
@@ -812,22 +708,11 @@ impl<I2C: I2c> Bmi270<I2C> {
 
     /// Perform gyroscope offset calibration (software-based)
     ///
-    /// This performs a software-based calibration by averaging multiple samples
-    /// and storing offset values internally. Offsets are applied automatically
-    /// when reading gyroscope data.
+    /// Sensor must be completely stationary during calibration.
+    /// Takes ~1s to complete (1000 samples).
     ///
-    /// The sensor must be completely stationary during calibration.
-    ///
-    /// # Example
-    /// ```no_run
-    /// // Keep sensor completely still, then:
-    /// imu.perform_gyr_foc(|us| delay.delay_us(us))?;
-    /// ```
-    ///
-    /// # Requirements
-    /// - Sensor must be completely stationary (no vibration)
-    /// - Gyroscope must be enabled
-    /// - Takes ~500ms to complete
+    /// # Arguments
+    /// * `delay` - Delay function taking microseconds [µs]
     pub fn perform_gyr_foc<D: FnMut(u32)>(
         &mut self,
         mut delay: D,
@@ -838,7 +723,7 @@ impl<I2C: I2c> Bmi270<I2C> {
         let pwr = self.read_reg(reg::PWR_CTRL)?;
         if (pwr & pwr_ctrl::GYR_EN) == 0 {
             self.write_reg(reg::PWR_CTRL, pwr | pwr_ctrl::GYR_EN)?;
-            delay(100000); // Wait for gyro to start (longer than accel)
+            delay(100000); // 100ms
         }
 
         // Disable advanced power save
@@ -851,14 +736,14 @@ impl<I2C: I2c> Bmi270<I2C> {
         let mut sum_z: i32 = 0;
 
         for _ in 0..NUM_SAMPLES {
-            delay(1000); // 1ms between samples
+            delay(1000); // 1ms
             let raw = self.read_gyro_raw_internal()?;
             sum_x += raw.x as i32;
             sum_y += raw.y as i32;
             sum_z += raw.z as i32;
         }
 
-        // Store offset (gyro should read 0 when stationary)
+        // Store offset [LSB]
         self.gyr_offset = (sum_x / NUM_SAMPLES, sum_y / NUM_SAMPLES, sum_z / NUM_SAMPLES);
 
         Ok(())
@@ -866,8 +751,8 @@ impl<I2C: I2c> Bmi270<I2C> {
 
     /// Perform both accelerometer and gyroscope offset calibration
     ///
-    /// Convenience method to calibrate both sensors at once.
-    /// Sensor must be stationary in the specified orientation.
+    /// # Arguments
+    /// * `delay` - Delay function taking microseconds [µs]
     pub fn perform_foc<D: FnMut(u32)>(
         &mut self,
         acc_config: FocAccConfig,
@@ -878,26 +763,22 @@ impl<I2C: I2c> Bmi270<I2C> {
         Ok(())
     }
 
-    /// Read current accelerometer offset values (software offset)
+    /// Read current accelerometer offset [LSB]
     pub fn read_acc_offset(&self) -> (i32, i32, i32) {
         self.acc_offset
     }
 
-    /// Write accelerometer offset values (software offset)
-    ///
-    /// Use this to restore previously calibrated offsets without running FOC again.
+    /// Write accelerometer offset [LSB]
     pub fn write_acc_offset(&mut self, offset: (i32, i32, i32)) {
         self.acc_offset = offset;
     }
 
-    /// Read current gyroscope offset values (software offset)
+    /// Read current gyroscope offset [LSB]
     pub fn read_gyr_offset(&self) -> (i32, i32, i32) {
         self.gyr_offset
     }
 
-    /// Write gyroscope offset values (software offset)
-    ///
-    /// Use this to restore previously calibrated offsets without running FOC again.
+    /// Write gyroscope offset [LSB]
     pub fn write_gyr_offset(&mut self, offset: (i32, i32, i32)) {
         self.gyr_offset = offset;
     }
@@ -930,7 +811,6 @@ impl<I2C: I2c> Bmi270<I2C> {
 }
 
 /// BMI270 configuration file (from Bosch official library)
-/// This is the "maximum FIFO" variant configuration
 static BMI270_CONFIG_FILE: [u8; 328] = [
     0xc8, 0x2e, 0x00, 0x2e, 0x80, 0x2e, 0x1a, 0x00, 0xc8, 0x2e, 0x00, 0x2e, 0xc8, 0x2e, 0x00, 0x2e,
     0xc8, 0x2e, 0x00, 0x2e, 0xc8, 0x2e, 0x00, 0x2e, 0xc8, 0x2e, 0x00, 0x2e, 0xc8, 0x2e, 0x00, 0x2e,

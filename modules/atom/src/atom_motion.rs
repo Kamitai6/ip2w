@@ -8,6 +8,14 @@ use embedded_hal::i2c::I2c;
 /// Atom Motion I2C address
 pub const DEFAULT_ADDR: u8 = 0x38;
 
+/// Motor speed limits
+pub const MOTOR_SPEED_MIN: i8 = -127;
+pub const MOTOR_SPEED_MAX: i8 = 127;
+
+/// Servo angle limits
+pub const SERVO_ANGLE_MIN: u8 = 0;
+pub const SERVO_ANGLE_MAX: u8 = 180;
+
 /// Register addresses
 mod reg {
     pub const MOTOR1: u8 = 0x20;
@@ -61,6 +69,7 @@ impl<I2C: I2c> AtomMotion<I2C> {
             MotorChannel::M1 => reg::MOTOR1,
             MotorChannel::M2 => reg::MOTOR2,
         };
+        let speed = speed.max(MOTOR_SPEED_MIN);// if -128 → -127
         self.write_reg(reg, speed as u8)
     }
 
@@ -76,7 +85,7 @@ impl<I2C: I2c> AtomMotion<I2C> {
             ServoChannel::S3 => reg::SERVO3,
             ServoChannel::S4 => reg::SERVO4,
         };
-        let angle = angle.min(180);
+        let angle = angle.min(SERVO_ANGLE_MAX);
         self.write_reg(reg, angle)
     }
 

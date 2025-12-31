@@ -60,6 +60,8 @@ esp_bootloader_esp_idf::esp_app_desc!();
 const FREQUENCY: u32 = 500;
 const PERIOD_US: u64 = 1_000_000 / FREQUENCY as u64;
 const DT: f32 = 1.0 / FREQUENCY as f32;
+const U_MAX: f32 = 300.0;
+
 static TIMER0: Mutex<RefCell<Option<Timg>>> = Mutex::new(RefCell::new(None));
 pub static TIMER_COUNTER: Mutex<Cell<u32>> = Mutex::new(Cell::new(0));
 
@@ -136,9 +138,9 @@ fn main() -> ! {
     // C(D)も上げ過ぎると発振するから、震えるまで上げて、しないギリギリまで下げる
     // 多分、ラムダとCを適当な値にして、ラムダかCをいい感じに上げながら最適化できそうなほうから合わせて、
     // 片方には強い感じまでやったら、アルファを上げてオフセットなどのモデル誤差を含めた外乱をすべて除けるようにしたら完成
-    let mut smc = smc::SuperTwistingSMC::new(DT, 200.0, 1000.0, 25.0)
+    let mut smc = smc::SuperTwistingSMC::new(DT, 200.0, 1500.0, 25.0)
         .with_smoothing(0.01, 0.00001)
-        .with_v_regulation(240.0, 0.00001);
+        .with_v_regulation(U_MAX * 0.8, 0.00001);
 
     let lcd_spi = lcd_spi!(peripherals);
     let di = lcd_display_interface!(peripherals, lcd_spi);
@@ -203,7 +205,7 @@ fn main() -> ! {
                             let e_dot = 0.0 - gy;
                             let fb = smc.update(e, e_dot);
                             let ff = 0.0;
-                            let output = deadzone::apply_deadzone(fb + ff, 300.0, 30.0, 127.0) as i8; //(限界-5)程度にするのが最適っぽいな
+                            let output = deadzone::apply_deadzone(fb + ff, U_MAX, 30.0, atom_motion::MOTOR_SPEED_MAX as f32) as i8; //(限界-5)程度にするのが最適っぽいな
                             m1_pwm = output;
                             m2_pwm = -output;
                         } else {
