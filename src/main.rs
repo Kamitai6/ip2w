@@ -138,7 +138,7 @@ fn main() -> ! {
     // C(D)も上げ過ぎると発振するから、震えるまで上げて、しないギリギリまで下げる
     // 多分、ラムダとCを適当な値にして、ラムダかCをいい感じに上げながら最適化できそうなほうから合わせて、
     // 片方には強い感じまでやったら、アルファを上げてオフセットなどのモデル誤差を含めた外乱をすべて除けるようにしたら完成
-    let mut smc = smc::SuperTwistingSMC::new(DT, 200.0, 1500.0, 25.0)
+    let mut smc = smc::SuperTwistingSMC::new(DT, 200.0, 800.0, 20.0)
         .with_smoothing(0.01, 0.00001)
         .with_v_regulation(U_MAX * 0.8, 0.00001);
 
@@ -201,7 +201,7 @@ fn main() -> ! {
                         }
 
                         if drive {
-                            let e = 0.16775 - state.pitch;
+                            let e = 0.16 - state.pitch;
                             let e_dot = 0.0 - gy;
                             let fb = smc.update(e, e_dot);
                             let ff = 0.0;
