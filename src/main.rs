@@ -130,7 +130,7 @@ fn main() -> ! {
         .with_v_regulation(U_MAX * 0.8, 0.00001);
 
     let mut gravity = gravity::GravityCompensator::new(0.1, 0.035, 500.0);
-    let mut pos_regulator = pos_regulator::PositionRegulator::new(DT, 0.00001, 0.1);
+    let mut pos_regulator = pos_regulator::PositionRegulator::new(DT, 0.01, 0.1);
 
     let lcd_spi = lcd_spi!(peripherals);
     let di = lcd_display_interface!(peripherals, lcd_spi);
@@ -168,7 +168,6 @@ fn main() -> ! {
     let mut button_state = false;
     let mut m1_pwm = 0;
     let mut m2_pwm = 0;
-    let mut target_angle = 0.0;
 
     info!("Start!");
     loop {
@@ -193,6 +192,7 @@ fn main() -> ! {
 
                         if drive {
                             let now_angle = state.pitch - 0.13;
+                            let target_angle = 0.0 + pos_regulator.update_x_up(ax, az, now_angle);
                             let e = target_angle - now_angle;
                             let e_dot = 0.0 - gy;
                             let fb = smc.update(e, e_dot);
@@ -200,7 +200,6 @@ fn main() -> ! {
                             let output = deadzone::apply_deadzone(fb + ff, U_MAX, 30.0, atom_motion::MOTOR_SPEED_MAX as f32) as i8; //(限界-5)程度にするのが最適っぽいな
                             m1_pwm = output;
                             m2_pwm = -output;
-                            target_angle = 0.0 - pos_regulator.update(output as f32);
                         } else {
                             m1_pwm = 0;
                             m2_pwm = 0;
