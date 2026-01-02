@@ -130,7 +130,9 @@ fn main() -> ! {
         .with_v_regulation(U_MAX * 0.8, 0.00001);
 
     let mut gravity = gravity::GravityCompensator::new(0.1, 0.035, 500.0);
-    let mut pos_regulator = pos_regulator::PositionRegulator::new(DT, 0.00001, 0.99, 0.1);
+    let mut pos_regulator = pos_regulator::PositionRegulator::new(DT, 200.0, 0.99, 0.1)
+        .with_lowpass(10.0) //Hz
+        ;
 
     let mut yaw_pid = pid::PID::new(DT, 0.0, 0.0, 20.0);
 
@@ -210,7 +212,7 @@ fn main() -> ! {
                             m1_pwm = (base_out + yaw_out).clamp(-127.0, 127.0) as i8;
                             m2_pwm = (-base_out + yaw_out).clamp(-127.0, 127.0) as i8;
 
-                            target_angle = 0.0;// - pos_regulator.update(fb + ff as f32);
+                            target_angle = 0.0 - pos_regulator.update(fb + ff);
                         } else {
                             m1_pwm = 0;
                             m2_pwm = 0;
