@@ -130,8 +130,7 @@ fn main() -> ! {
         .with_v_regulation(U_MAX * 0.8, 0.00001);
 
     let mut gravity = gravity::GravityCompensator::new(0.1, 0.035, 500.0);
-    let mut pos_regulator = pos_regulator::PositionRegulator::new(DT, 200.0, 0.99, 0.1)
-        .with_lowpass(10.0) //Hz
+    let mut pos_regulator = pos_regulator::PositionRegulator::new(DT, 50.0, 0.9, 0.1)
         ;
 
     let mut yaw_pid = pid::PID::new(DT, 0.0, 0.0, 20.0);
@@ -201,18 +200,19 @@ fn main() -> ! {
                             let e_dot = 0.0 - gy;
                             let fb = smc.update(e, e_dot);
                             let ff = -gravity.update(now_angle);
-                            let base_out = deadzone::apply_deadzone(fb + ff, U_MAX, 30.0, atom_motion::MOTOR_SPEED_MAX as f32); //(限界-5)程度にするのが最適っぽいな
+                            let atom_max = atom_motion::MOTOR_SPEED_MAX as f32;
+                            let base_out = deadzone::apply_deadzone(fb + ff, U_MAX, 30.0, atom_max); //(限界-5)程度にするのが最適っぽいな
                             
                             let yaw_e = 0.0 - state.yaw;
                             let yaw_e_dot = 0.0 - gz;
                             let yaw_result = yaw_pid.update_with_d(yaw_e, yaw_e_dot);
                             let yaw_out_max = atom_motion::MOTOR_SPEED_MAX as f32 / 3.0;
                             let yaw_out = yaw_result.clamp(-yaw_out_max, yaw_out_max);
+                            
+                            m1_pwm = (base_out + yaw_out).clamp(-atom_max, atom_max) as i8;
+                            m2_pwm = (-base_out + yaw_out).clamp(-atom_max, atom_max) as i8;
 
-                            m1_pwm = (base_out + yaw_out).clamp(-127.0, 127.0) as i8;
-                            m2_pwm = (-base_out + yaw_out).clamp(-127.0, 127.0) as i8;
-
-                            target_angle = 0.0 - pos_regulator.update(fb + ff);
+                            target_angle = 0.0 - pos_regulator.update(base_out);
                         } else {
                             m1_pwm = 0;
                             m2_pwm = 0;
