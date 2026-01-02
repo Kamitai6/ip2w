@@ -131,6 +131,7 @@ fn main() -> ! {
 
     let mut gravity = gravity::GravityCompensator::new(0.1, 0.035, 500.0);
     let mut pos_regulator = pos_regulator::PositionRegulator::new(DT, 50.0, 0.1, 0.1)
+        .with_lead(-0.001)
         .with_lowpass(5.0) //Hz
         ;
 
