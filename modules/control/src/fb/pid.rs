@@ -27,11 +27,19 @@ impl PID {
 
     /// let err = target - value;
     pub fn update(&mut self, err: f32) -> f32 {
-        self.integral = (self.integral + err * self.dt).clamp(-self.integral_limit, self.integral_limit);
+        self.integral = (self.integral + err * self.dt)
+            .clamp(-self.integral_limit, self.integral_limit);
         let derivative = (err - self.prev_err) / self.dt;
         self.prev_err = err;
 
         self.kp * err + self.ki * self.integral + self.kd * derivative
+    }
+
+    /// Update with externally provided derivative (e.g., from gyro sensor)
+    pub fn update_with_d(&mut self, err: f32, err_dot: f32) -> f32 {
+        self.integral = (self.integral + err * self.dt)
+            .clamp(-self.integral_limit, self.integral_limit);
+        self.kp * err + self.ki * self.integral + self.kd * err_dot
     }
 
     pub fn reset(&mut self) {

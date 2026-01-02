@@ -35,7 +35,7 @@ use embedded_graphics::{
 };
 use embedded_hal_bus::i2c::{RefCellDevice as I2cRefCellDevice};
 use atom::{atom_motion, bmi270, lp5562};
-use control::{fb::smc, ff::{gravity, pos_regulator}, util::{imu_ekf, deadzone}};
+use control::{fb::{pid, smc}, ff::{gravity, pos_regulator}, util::{imu_ekf, deadzone}};
 
 mod events;
 
@@ -125,12 +125,14 @@ fn main() -> ! {
     // C(D)も上げ過ぎると発振するから、震えるまで上げて、しないギリギリまで下げる
     // 多分、ラムダとCを適当な値にして、ラムダかCをいい感じに上げながら最適化できそうなほうから合わせて、
     // 片方には強い感じまでやったら、アルファを上げてオフセットなどのモデル誤差を含めた外乱をすべて除けるようにしたら完成
-    let mut smc = smc::SuperTwistingSMC::new(DT, 200.0, 800.0, 20.0)
+    let mut smc = smc::SuperTwistingSMC::new(DT, 200.0, 800.0, 25.0)
         .with_smoothing(0.1, 0.00001) //やっぱりこれもちゃんと設定しないとダメみたい。1.0や0.01よりも0.1のほうが明らかに良い
         .with_v_regulation(U_MAX * 0.8, 0.00001);
 
     let mut gravity = gravity::GravityCompensator::new(0.1, 0.035, 500.0);
     let mut pos_regulator = pos_regulator::PositionRegulator::new(DT, 0.00001, 0.99, 0.1);
+
+    let mut yaw_pid = pid::PID::new(DT, 0.0, 0.0, 20.0);
 
     let lcd_spi = lcd_spi!(peripherals);
     let di = lcd_display_interface!(peripherals, lcd_spi);
@@ -192,19 +194,28 @@ fn main() -> ! {
                         }
 
                         if drive {
-                            let now_angle = state.pitch - 0.13;
+                            let now_angle = state.pitch - 0.125;
                             let e = target_angle - now_angle;
                             let e_dot = 0.0 - gy;
                             let fb = smc.update(e, e_dot);
                             let ff = -gravity.update(now_angle);
-                            let output = deadzone::apply_deadzone(fb + ff, U_MAX, 30.0, atom_motion::MOTOR_SPEED_MAX as f32) as i8; //(限界-5)程度にするのが最適っぽいな
-                            m1_pwm = output;
-                            m2_pwm = -output;
-                            target_angle = 0.0 - pos_regulator.update(fb + ff as f32);
+                            let base_out = deadzone::apply_deadzone(fb + ff, U_MAX, 30.0, atom_motion::MOTOR_SPEED_MAX as f32); //(限界-5)程度にするのが最適っぽいな
+                            
+                            let yaw_e = 0.0 - state.yaw;
+                            let yaw_e_dot = 0.0 - gz;
+                            let yaw_result = yaw_pid.update_with_d(yaw_e, yaw_e_dot);
+                            let yaw_out_max = atom_motion::MOTOR_SPEED_MAX as f32 / 3.0;
+                            let yaw_out = yaw_result.clamp(-yaw_out_max, yaw_out_max);
+
+                            m1_pwm = (base_out + yaw_out).clamp(-127.0, 127.0) as i8;
+                            m2_pwm = (-base_out + yaw_out).clamp(-127.0, 127.0) as i8;
+
+                            target_angle = 0.0;// - pos_regulator.update(fb + ff as f32);
                         } else {
                             m1_pwm = 0;
                             m2_pwm = 0;
                             smc.reset();
+                            yaw_pid.reset();
                             pos_regulator.reset();
                         }
                         let _ = motion.set_motor(atom_motion::MotorChannel::M1, m1_pwm);
