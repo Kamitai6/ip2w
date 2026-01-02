@@ -130,7 +130,8 @@ fn main() -> ! {
         .with_v_regulation(U_MAX * 0.8, 0.00001);
 
     let mut gravity = gravity::GravityCompensator::new(0.1, 0.035, 500.0);
-    let mut pos_regulator = pos_regulator::PositionRegulator::new(DT, 50.0, 0.9, 0.1)
+    let mut pos_regulator = pos_regulator::PositionRegulator::new(DT, 50.0, 0.1, 0.1)
+        .with_lowpass(5.0) //Hz
         ;
 
     let mut yaw_pid = pid::PID::new(DT, 0.0, 0.0, 20.0);
