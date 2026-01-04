@@ -14,17 +14,13 @@ use defmt::info;
 use {esp_backtrace as _, esp_println as _};
 
 use esp_hal::{
-    clock::CpuClock,
-    gpio::{Event, Input, InputConfig, Io, Level, Output, OutputConfig, Pull},
-    delay::Delay,
-    time::{Duration, Instant, Rate},
-    timer::{Timer, timg::{Timer as Timg, TimerGroup}},
-    main,
-    handler,
+    clock::CpuClock, delay::Delay, gpio::{Event, Input, InputConfig, Io, Level, Output, OutputConfig, Pull}, handler, lcd_cam::lcd, main, time::{Duration, Instant, Rate}, timer::{Timer, timg::{Timer as Timg, TimerGroup}}
 };
-use esp_bsp::{lcd_spi, lcd_backlight_init, lcd_display_interface, lcd_display, i2c0_init, i2c1_init, BoardType, DisplayConfig};
+use esp_bsp::{lcd_spi, lcd_backlight_init, 
+    // lcd_display_interface, lcd_display, 
+    i2c0_init, i2c1_init, BoardType, DisplayConfig};
 use embedded_graphics::{
-    prelude::{IntoStorage, RgbColor, Point, DrawTarget},
+    prelude::{IntoStorage, RgbColor, Point, DrawTarget, Primitive},
     pixelcolor::Rgb565,
     mono_font::{
         ascii::FONT_10X20,
@@ -32,12 +28,16 @@ use embedded_graphics::{
     },
     text::{Alignment, Text},
     Drawable,
+    primitives::{Circle, PrimitiveStyle},
 };
 use embedded_hal_bus::i2c::{RefCellDevice as I2cRefCellDevice};
 use atom::{atom_motion, bmi270, lp5562};
 use control::{fb::{pid, smc}, ff::{gravity, pos_regulator}, util::{imu_ekf, deadzone}};
+use mipidsi_async::{Builder, options::{Orientation, Rotation, ColorOrder, ColorInversion}, models::{GC9107, ST7789}};
+use esp_display_interface::{dma_resources, DmaSpiInterface};
 
 mod events;
+mod eye;
 
 extern crate alloc;
 
@@ -65,6 +65,11 @@ fn main() -> ! {
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 73744);
     let mut delay = Delay::new();
     let timg0 = TimerGroup::new(peripherals.TIMG0);
+    let timg1 = TimerGroup::new(peripherals.TIMG1);
+    let mut wdt0 = timg0.wdt;
+    wdt0.disable();
+    let mut wdt1 = timg1.wdt;
+    wdt1.disable();
 
     let button = Input::new(peripherals.GPIO41, InputConfig::default().with_pull(Pull::Up));
 
@@ -138,19 +143,47 @@ fn main() -> ! {
     let mut yaw_pid = pid::PID::new(DT, 0.0, 0.0, 20.0);
 
     let lcd_spi = lcd_spi!(peripherals);
-    let di = lcd_display_interface!(peripherals, lcd_spi);
-    let mut display = lcd_display!(peripherals, di, &mut delay).unwrap();
+    // let di = lcd_display_interface!(peripherals, lcd_spi);
+    // let mut display = lcd_display!(peripherals, di, &mut delay).unwrap();
+    let lcd_dc = esp_hal::gpio::Output::new(
+        peripherals.GPIO42, 
+        esp_hal::gpio::Level::Low, 
+        esp_hal::gpio::OutputConfig::default()
+    );
+    let lcd_rst = esp_hal::gpio::Output::new(
+        peripherals.GPIO48, 
+        esp_hal::gpio::Level::High, 
+        esp_hal::gpio::OutputConfig::default()
+    );
 
-    display.clear(Rgb565::RED).unwrap();
-    delay.delay_millis(10);
-    display.clear(Rgb565::GREEN).unwrap();
-    delay.delay_millis(10);
-    display.clear(Rgb565::BLUE).unwrap();
-    delay.delay_millis(10);
-    display.clear(Rgb565::WHITE).unwrap();
+    dma_resources!(DISPLAY, 128, 128);
 
-    let _ = Text::with_alignment("HELLO WORLD!", Point::new(64, 64), MonoTextStyleBuilder::new().font(&FONT_10X20).text_color(RgbColor::BLACK).build(),  Alignment::Center)
-        .draw(&mut display);
+    let mut display = unsafe {
+        let interface = DmaSpiInterface::new(
+            lcd_spi, lcd_dc,
+            &raw mut DISPLAY_DESC,
+            &raw mut DISPLAY_CMD_BUF,
+        );
+
+        Builder::new(GC9107, interface)
+            .reset_pin(lcd_rst)
+            .display_size(128, 128)
+            // .display_offset(0, 32)
+            .orientation(Orientation::new().rotate(Rotation::Deg180))
+            .color_order(ColorOrder::Bgr)
+            .invert_colors(ColorInversion::Normal)
+            .init(&mut delay, &raw mut DISPLAY_FB_A, &raw mut DISPLAY_FB_B)
+            .unwrap()
+    };
+
+    // display.clear(Rgb565::RED).unwrap();
+    // delay.delay_millis(1000);
+    // display.clear(Rgb565::WHITE).unwrap();
+    // delay.delay_millis(1000);
+    // display.clear(Rgb565::BLACK).unwrap();
+
+    // let _ = Text::with_alignment("HELLO WORLD!", Point::new(64, 64), MonoTextStyleBuilder::new().font(&FONT_10X20).text_color(RgbColor::BLACK).build(),  Alignment::Center)
+    //     .draw(&mut display);
     
     // esp_rtos::start(timg0.timer0);
     // let radio_init = esp_radio::init().expect("Failed to initialize Wi-Fi/BLE controller");
@@ -175,8 +208,17 @@ fn main() -> ! {
     let mut m2_pwm = 0;
     let mut target_angle = 0.0;
 
+    // 目の初期化 (画面中央付近に2つ配置)
+    let mut left_eye = eye::Eye::new(32, 64, 22);
+    let mut right_eye = eye::Eye::new(96, 64, 22);
+
+    // アニメーション用変数
+    let mut offset_x = 0;
+    let mut direction = 1;
+
     info!("Start!");
     loop {
+        display.poll();
         // イベントがあるかチェック
         if events::has_pending_events() {
             // 全てのイベントを処理
@@ -226,7 +268,39 @@ fn main() -> ! {
                         let _ = motion.set_motor(atom_motion::MotorChannel::M2, m2_pwm);
                     }
                     events::Event::DisplayUpdate => {
+                        // 2. 視線の更新（左右に動く）
+                        // offset_x += direction * 2;
+                        // if offset_x > 12 || offset_x < -12 {
+                        //     direction *= -1;
+                        // }
 
+                        // left_eye.look_at(offset_x, 0);
+                        // right_eye.look_at(offset_x, 0);
+
+                        // // 3. 描画
+                        // left_eye.draw(&mut display).unwrap();
+                        // right_eye.draw(&mut display).unwrap();
+
+                        if display.is_idle() {
+                            // clearのエラーは無視、またはログ出力 (Resultを捨てる)
+                            if let Err(_) = display.clear(Rgb565::BLACK) {
+                                // defmt::error!("clear failed");
+                            }
+
+                            // 図形の描画
+                            // .unwrap() を削除し、Resultを処理（ここでは失敗しても無視）
+                            if let Err(_) = Circle::new(Point::new(50, 50), 20)
+                                .into_styled(PrimitiveStyle::with_fill(Rgb565::RED))
+                                .draw(&mut display) {
+                                    // defmt::error!("Circle failed");
+                                }
+
+                            // DMA転送開始
+                            // ここが最も失敗しやすい箇所ですが、unwrap()を外すことで再試行させる
+                            if let Err(_) = display.flush_async() {
+                                // defmt::error!("Flush failed");
+                            }
+                        }
                     }
                 }
             }

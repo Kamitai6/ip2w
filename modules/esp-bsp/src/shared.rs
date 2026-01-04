@@ -1,35 +1,36 @@
 #[macro_export]
 macro_rules! shared_lcd_spi {
-    ($peripherals:ident, $dma_channel:expr, $sck:expr, $mosi:expr) => {
+    ($peripherals:ident, $dma_channel:expr, $sck:expr, $mosi:expr, $cs:expr) => {
         ::esp_hal::spi::master::Spi::new(
             $peripherals.SPI2,
             ::esp_hal::spi::master::Config::default()
-                .with_frequency(::esp_hal::time::Rate::from_mhz(40))
+                .with_frequency(::esp_hal::time::Rate::from_mhz(80))
                 .with_mode(::esp_hal::spi::Mode::_0)
         )
         .unwrap()
         .with_sck($sck)
         .with_mosi($mosi)
+        .with_cs($cs)
         .with_dma($dma_channel)
     };
 }
 
-#[macro_export]
-macro_rules! shared_lcd_display_interface {
-    ($peripherals:ident, $spi:expr, $dc_pin:expr, $cs_pin:expr) => {{
-        let lcd_dc = ::esp_hal::gpio::Output::new(
-            $dc_pin, 
-            ::esp_hal::gpio::Level::Low, 
-            ::esp_hal::gpio::OutputConfig::default()
-        );
-        let lcd_cs = ::esp_hal::gpio::Output::new(
-            $cs_pin, 
-            ::esp_hal::gpio::Level::High, 
-            ::esp_hal::gpio::OutputConfig::default()
-        );
-        ::esp_spidma_interface::spidma_interface::SPIInterface::new($spi, lcd_dc, lcd_cs)
-    }};
-}
+// #[macro_export]
+// macro_rules! shared_lcd_display_interface {
+//     ($peripherals:ident, $spi:expr, $dc_pin:expr, $cs_pin:expr) => {{
+//         let lcd_dc = ::esp_hal::gpio::Output::new(
+//             $dc_pin, 
+//             ::esp_hal::gpio::Level::Low, 
+//             ::esp_hal::gpio::OutputConfig::default()
+//         );
+//         // let lcd_cs = ::esp_hal::gpio::Output::new(
+//         //     $cs_pin, 
+//         //     ::esp_hal::gpio::Level::High, 
+//         //     ::esp_hal::gpio::OutputConfig::default()
+//         // );
+//         ::esp_spidma_interface::spidma_interface::SPIInterface::new_no_cs($spi, lcd_dc)
+//     }};
+// }
 
 #[macro_export]
 macro_rules! shared_lcd_display {
@@ -50,5 +51,7 @@ macro_rules! shared_lcd_display {
 }
 
 pub use {
-    shared_lcd_spi, shared_lcd_display_interface, shared_lcd_display
+    shared_lcd_spi, 
+    // shared_lcd_display_interface, 
+    shared_lcd_display
 };

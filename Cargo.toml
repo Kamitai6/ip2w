@@ -18,7 +18,7 @@ esp-radio = { version = "0.17", features = [
   "unstable",
   "wifi",
 ] }
-esp-spidma-interface = { version = "0.3", features = ["esp32s3"], path = "./modules/esp-spidma-interface"}
+esp-display-interface = { version = "0.3", features = ["esp32s3"], path = "./modules/esp-display-interface"}
 esp-bsp = {version = "0.5", features = ["m5atom-s3r"], path = "./modules/esp-bsp"}
 
 embedded-hal = "1.0"
@@ -28,11 +28,11 @@ embedded-hal-bus = "0.3"
 
 atom = {version = "0.1", path = "./modules/atom"}
 control = {version = "0.1", path = "./modules/control"}
+mipidsi-async = {version = "0.9", path = "./modules/mipidsi-async"}
 critical-section = "1.2"
 defmt = "1.0"
 heapless = "0.9"
 libm = {version = "0.2"}
-mipidsi = "0.9"
 smoltcp = { version = "0.12", default-features = false, features = [
   "defmt",
   "medium-ethernet",

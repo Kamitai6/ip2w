@@ -616,6 +616,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "esp-display-interface"
+version = "0.3.0"
+dependencies = [
+ "byte-slice-cast",
+ "defmt 1.0.1",
+ "embedded-dma",
+ "embedded-graphics",
+ "embedded-hal 1.0.0",
+ "esp-hal",
+ "mipidsi-async",
+ "num-traits",
+ "paste",
+]
+
+[[package]]
 name = "esp-hal"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -806,20 +821,6 @@ dependencies = [
  "esp-radio-rtos-driver",
  "esp-sync",
  "portable-atomic",
-]
-
-[[package]]
-name = "esp-spidma-interface"
-version = "0.3.0"
-dependencies = [
- "byte-slice-cast",
- "defmt 1.0.1",
- "embedded-dma",
- "embedded-graphics",
- "embedded-hal 1.0.0",
- "esp-hal",
- "mipidsi",
- "num-traits",
 ]
 
 [[package]]
@@ -1116,14 +1117,14 @@ dependencies = [
  "esp-backtrace",
  "esp-bootloader-esp-idf",
  "esp-bsp",
+ "esp-display-interface",
  "esp-hal",
  "esp-println",
  "esp-radio",
  "esp-rtos",
- "esp-spidma-interface",
  "heapless 0.9.2",
  "libm",
- "mipidsi",
+ "mipidsi-async",
  "smoltcp",
 ]
 
@@ -1215,15 +1216,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3c8dda44ff03a2f238717214da50f65d5a53b45cd213a7370424ffdb6fae815"
 
 [[package]]
-name = "mipidsi"
+name = "mipidsi-async"
 version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9ba34dcbf61182ffa6992b5a4d9b566d5a99df127fd93f6d314213347329e92f"
 dependencies = [
+ "defmt 1.0.1",
  "embedded-graphics-core",
  "embedded-hal 1.0.0",
  "heapless 0.8.0",
- "nb 1.1.0",
 ]
 
 [[package]]

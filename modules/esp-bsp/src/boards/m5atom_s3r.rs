@@ -12,7 +12,8 @@ macro_rules! lcd_spi {
             $peripherals,
             $peripherals.DMA_CH0,
             $peripherals.GPIO15, // SCK
-            $peripherals.GPIO21 // MOSI
+            $peripherals.GPIO21, // MOSI
+            $peripherals.GPIO14 //CS
         )
     };
 }
@@ -33,31 +34,31 @@ macro_rules! lcd_backlight_init {
     }};
 }
 
-#[macro_export]
-macro_rules! lcd_display_interface {
-    ($peripherals:ident, $spi:expr) => {
-        ::esp_bsp::shared_lcd_display_interface!($peripherals, $spi, $peripherals.GPIO42, $peripherals.GPIO14) //DC, CS
-    };
-}
+// #[macro_export]
+// macro_rules! lcd_display_interface {
+//     ($peripherals:ident, $spi:expr) => {
+//         ::esp_bsp::shared_lcd_display_interface!($peripherals, $spi, $peripherals.GPIO42, $peripherals.GPIO14) //DC, CS
+//     };
+// }
 
-#[macro_export]
-macro_rules! lcd_display {
-    ($peripherals:ident, $di:expr, $delay:expr) => {
-        ::esp_bsp::shared_lcd_display!(
-            $di,
-            ::mipidsi::models::GC9107,
-            ::esp_bsp::lcd_reset_pin!($peripherals),
-            $crate::LCD_SIZE_W as u16,
-            $crate::LCD_SIZE_H as u16,
-            $crate::LCD_OFFSET_W as u16,
-            $crate::LCD_OFFSET_H as u16,
-            ::mipidsi::options::Orientation::new().rotate(::mipidsi::options::Rotation::Deg180),
-            ::mipidsi::options::ColorOrder::Bgr,
-            ::mipidsi::options::ColorInversion::Normal
-        )
-        .init($delay)
-    };
-}
+// #[macro_export]
+// macro_rules! lcd_display {
+//     ($peripherals:ident, $di:expr, $delay:expr) => {
+//         ::esp_bsp::shared_lcd_display!(
+//             $di,
+//             ::mipidsi::models::GC9107,
+//             ::esp_bsp::lcd_reset_pin!($peripherals),
+//             $crate::LCD_SIZE_W as u16,
+//             $crate::LCD_SIZE_H as u16,
+//             $crate::LCD_OFFSET_W as u16,
+//             $crate::LCD_OFFSET_H as u16,
+//             ::mipidsi::options::Orientation::new().rotate(::mipidsi::options::Rotation::Deg180),
+//             ::mipidsi::options::ColorOrder::Bgr,
+//             ::mipidsi::options::ColorInversion::Normal
+//         )
+//         .init($delay)
+//     };
+// }
 
 #[macro_export]
 macro_rules! i2c0_init {
@@ -86,6 +87,10 @@ macro_rules! i2c1_init {
 }
 
 pub use {
-    i2c0_init, i2c1_init, lcd_backlight_init, lcd_display, lcd_display_interface,
+    i2c0_init, 
+    i2c1_init, 
+    lcd_backlight_init, 
+    // lcd_display, 
+    // lcd_display_interface,
     lcd_spi,
 };
