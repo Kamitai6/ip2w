@@ -46,7 +46,7 @@ use mipidsi_async::{
 use esp_display_interface::{dma_resources, DmaSpiInterface};
 
 mod events;
-mod eye;
+mod face;
 
 extern crate alloc;
 
@@ -186,6 +186,8 @@ fn main() -> ! {
             .unwrap()
     };
 
+    let mut face = face::Face::new(Point::new(64, 64), 50, 20);
+
     // ラムダ(P)は上げ過ぎると発散するから、するところまで上げて、しないギリギリまで下げる
     // アルファ(I)は外乱が大きいほど高くしないといけないから、小さい値からはじめて、ギリギリ外乱に耐えられるまで上げる
     // C(D)も上げ過ぎると発振するから、震えるまで上げて、しないギリギリまで下げる
@@ -224,11 +226,6 @@ fn main() -> ! {
     let mut m1_pwm = 0;
     let mut m2_pwm = 0;
     let mut target_angle = 0.0;
-
-    let mut left_eye = eye::Eye::new(32, 64, 22);
-    let mut right_eye = eye::Eye::new(96, 64, 22);
-    let mut offset_x = 0;
-    let mut direction = 1;
 
     info!("Start!");
     loop {
@@ -283,20 +280,8 @@ fn main() -> ! {
                         if display.is_idle() {
                             display.clear(Rgb565::BLACK).unwrap();
 
-                            // let _ = Text::with_alignment("HELLO WORLD!", Point::new(64, 64), MonoTextStyleBuilder::new().font(&FONT_10X20).text_color(RgbColor::WHITE).build(),  Alignment::Center)
-                            //     .draw(&mut display);
-                            // 2. 視線の更新（左右に動く）
-                            offset_x += direction * 2;
-                            if offset_x > 12 || offset_x < -12 {
-                                direction *= -1;
-                            }
-
-                            left_eye.look_at(offset_x, 0);
-                            right_eye.look_at(offset_x, 0);
-
-                            // 3. 描画
-                            left_eye.draw(&mut display).unwrap();
-                            right_eye.draw(&mut display).unwrap();
+                            face.set_emotion(face::Emotion::Neutral);
+                            face.update(&mut display, DT * 10.0).unwrap();
 
                             display.flush_async().unwrap();
                         }
