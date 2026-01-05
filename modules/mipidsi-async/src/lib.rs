@@ -184,6 +184,10 @@ where
     /// Call this regularly in your main loop. When a transfer completes,
     /// the display transitions from `Busy` to `Idle` state.
     ///
+    /// This method handles chunked transfers automatically - for large
+    /// framebuffers, it will advance to the next chunk when the current
+    /// chunk completes.
+    ///
     /// # Example
     ///
     /// ```ignore
@@ -201,9 +205,11 @@ where
     /// }
     /// ```
     pub fn poll(&mut self) {
-        if self.state == TransferState::Busy && self.interface.is_transfer_done() {
-            self.interface.finish_transfer();
-            self.state = TransferState::Idle;
+        if self.state == TransferState::Busy {
+            // poll_transfer handles chunked transfers and returns true when fully done
+            if self.interface.poll_transfer() {
+                self.state = TransferState::Idle;
+            }
         }
     }
 
@@ -273,7 +279,6 @@ where
     /// }
     /// ```
     pub fn flush_async(&mut self) -> Result<bool, I::Error> {
-        
         if self.state != TransferState::Idle {
             return Ok(false);
         }

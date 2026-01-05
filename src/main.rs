@@ -33,7 +33,7 @@ use embedded_graphics::{
 use embedded_hal_bus::i2c::{RefCellDevice as I2cRefCellDevice};
 use atom::{atom_motion, bmi270, lp5562};
 use control::{fb::{pid, smc}, ff::{gravity, pos_regulator}, util::{imu_ekf, deadzone}};
-use mipidsi_async::{Builder, options::{Orientation, Rotation, ColorOrder, ColorInversion}, models::{GC9107, ST7789}};
+use mipidsi_async::{Builder, models::{GC9107, ST7789}, options::{ColorInversion, ColorOrder, Orientation, RefreshOrder, Rotation, VerticalRefreshOrder, HorizontalRefreshOrder}};
 use esp_display_interface::{dma_resources, DmaSpiInterface};
 
 mod events;
@@ -168,22 +168,15 @@ fn main() -> ! {
         Builder::new(GC9107, interface)
             .reset_pin(lcd_rst)
             .display_size(128, 128)
-            // .display_offset(0, 32)
-            .orientation(Orientation::new().rotate(Rotation::Deg180))
+            .display_offset(0, 32)
+            .orientation(Orientation::new()
+                .rotate(Rotation::Deg270))
+            .refresh_order(RefreshOrder::new(VerticalRefreshOrder::BottomToTop, HorizontalRefreshOrder::LeftToRight))
             .color_order(ColorOrder::Bgr)
             .invert_colors(ColorInversion::Normal)
             .init(&mut delay, &raw mut DISPLAY_FB_A, &raw mut DISPLAY_FB_B)
             .unwrap()
     };
-
-    // display.clear(Rgb565::RED).unwrap();
-    // delay.delay_millis(1000);
-    // display.clear(Rgb565::WHITE).unwrap();
-    // delay.delay_millis(1000);
-    // display.clear(Rgb565::BLACK).unwrap();
-
-    // let _ = Text::with_alignment("HELLO WORLD!", Point::new(64, 64), MonoTextStyleBuilder::new().font(&FONT_10X20).text_color(RgbColor::BLACK).build(),  Alignment::Center)
-    //     .draw(&mut display);
     
     // esp_rtos::start(timg0.timer0);
     // let radio_init = esp_radio::init().expect("Failed to initialize Wi-Fi/BLE controller");
@@ -219,9 +212,7 @@ fn main() -> ! {
     info!("Start!");
     loop {
         display.poll();
-        // イベントがあるかチェック
         if events::has_pending_events() {
-            // 全てのイベントを処理
             while let Some(event) = events::get_event() {
                 match event {
                     events::Event::MotionUpdate => {
@@ -282,24 +273,13 @@ fn main() -> ! {
                         // right_eye.draw(&mut display).unwrap();
 
                         if display.is_idle() {
-                            // clearのエラーは無視、またはログ出力 (Resultを捨てる)
-                            if let Err(_) = display.clear(Rgb565::BLACK) {
-                                // defmt::error!("clear failed");
-                            }
+                            display.clear(Rgb565::BLACK).unwrap();
 
-                            // 図形の描画
-                            // .unwrap() を削除し、Resultを処理（ここでは失敗しても無視）
-                            if let Err(_) = Circle::new(Point::new(50, 50), 20)
-                                .into_styled(PrimitiveStyle::with_fill(Rgb565::RED))
-                                .draw(&mut display) {
-                                    // defmt::error!("Circle failed");
-                                }
+                            let _ = Text::with_alignment("HELLO WORLD!", Point::new(64, 64), MonoTextStyleBuilder::new().font(&FONT_10X20).text_color(RgbColor::WHITE).build(),  Alignment::Center)
+                                .draw(&mut display);
+                                
 
-                            // DMA転送開始
-                            // ここが最も失敗しやすい箇所ですが、unwrap()を外すことで再試行させる
-                            if let Err(_) = display.flush_async() {
-                                // defmt::error!("Flush failed");
-                            }
+                            display.flush_async().unwrap();
                         }
                     }
                 }

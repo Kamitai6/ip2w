@@ -1,40 +1,38 @@
+//! ST7796 display driver.
+
 use embedded_graphics_core::pixelcolor::Rgb565;
 use embedded_hal::delay::DelayNs;
 
 use crate::{
     dcs::SetAddressMode,
-    interface::{Interface, InterfaceKind},
-    models::{Model, ModelInitError},
+    interface::Interface,
     options::ModelOptions,
-    ConfigurationError,
 };
 
-/// ST7796 display in Rgb565 color mode.
+use super::{InitError, Model, ST7789};
+
+/// ST7796 display driver.
+///
+/// Display size: 320x480
+#[derive(Debug, Clone, Copy, Default)]
 pub struct ST7796;
 
 impl Model for ST7796 {
     type ColorFormat = Rgb565;
+
     const FRAMEBUFFER_SIZE: (u16, u16) = (320, 480);
 
-    fn init<DELAY, DI>(
+    fn init<DI, DELAY>(
         &mut self,
         di: &mut DI,
         delay: &mut DELAY,
         options: &ModelOptions,
-    ) -> Result<SetAddressMode, ModelInitError<DI::Error>>
+    ) -> Result<SetAddressMode, InitError<DI::Error>>
     where
-        DELAY: DelayNs,
         DI: Interface,
+        DELAY: DelayNs,
     {
-        if !matches!(
-            DI::KIND,
-            InterfaceKind::Serial4Line | InterfaceKind::Parallel8Bit | InterfaceKind::Parallel16Bit
-        ) {
-            return Err(ModelInitError::InvalidConfiguration(
-                ConfigurationError::UnsupportedInterface,
-            ));
-        }
-
-        super::ST7789.init(di, delay, options)
+        // ST7796 uses the same init sequence as ST7789
+        ST7789.init(di, delay, options)
     }
 }

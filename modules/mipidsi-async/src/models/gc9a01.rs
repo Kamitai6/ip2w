@@ -1,43 +1,37 @@
+//! GC9A01 display driver.
+
 use embedded_graphics_core::pixelcolor::Rgb565;
 use embedded_hal::delay::DelayNs;
 
 use crate::{
-    dcs::{
-        BitsPerPixel, ExitSleepMode, InterfaceExt, PixelFormat, SetAddressMode, SetDisplayOn,
-        SetInvertMode, SetPixelFormat,
-    },
-    interface::{Interface, InterfaceKind},
-    models::{Model, ModelInitError},
+    dcs::{self, InterfaceExt, SetAddressMode},
+    interface::Interface,
     options::ModelOptions,
-    ConfigurationError,
 };
 
-/// GC9A01 display in Rgb565 color mode.
+use super::{InitError, Model};
+
+/// GC9A01 display driver (round display).
+///
+/// Display size: 240x240
+#[derive(Debug, Clone, Copy, Default)]
 pub struct GC9A01;
 
 impl Model for GC9A01 {
     type ColorFormat = Rgb565;
+
     const FRAMEBUFFER_SIZE: (u16, u16) = (240, 240);
 
-    fn init<DELAY, DI>(
+    fn init<DI, DELAY>(
         &mut self,
         di: &mut DI,
         delay: &mut DELAY,
         options: &ModelOptions,
-    ) -> Result<SetAddressMode, ModelInitError<DI::Error>>
+    ) -> Result<SetAddressMode, InitError<DI::Error>>
     where
-        DELAY: DelayNs,
         DI: Interface,
+        DELAY: DelayNs,
     {
-        if !matches!(
-            DI::KIND,
-            InterfaceKind::Serial4Line | InterfaceKind::Parallel8Bit | InterfaceKind::Parallel16Bit
-        ) {
-            return Err(ModelInitError::InvalidConfiguration(
-                ConfigurationError::UnsupportedInterface,
-            ));
-        }
-
         let madctl = SetAddressMode::from(options);
 
         delay.delay_us(200_000);
@@ -63,10 +57,11 @@ impl Model for GC9A01 {
 
         di.write_raw(0xB6, &[0x00, 0x20])?; // display function control
 
-        di.write_command(madctl)?; // set memory data access control, Top -> Bottom, RGB, Left -> Right
+        // Memory access control
+        di.write_command(madctl)?;
 
-        let pf = PixelFormat::with_all(BitsPerPixel::from_rgb_color::<Self::ColorFormat>());
-        di.write_command(SetPixelFormat::new(pf))?; // set interface pixel format, 16bit pixel into frame memory
+        // Set pixel format to 16-bit (RGB565)
+        di.write_command(dcs::SetPixelFormat::new(dcs::PixelFormat::Bpp16))?;
 
         di.write_raw(0x90, &[0x08, 0x08, 0x08, 0x08])?;
         di.write_raw(0xBD, &[0x06])?;
@@ -122,12 +117,15 @@ impl Model for GC9A01 {
         di.write_raw(0x74, &[0x10, 0x85, 0x80, 0x00, 0x00, 0x4E, 0x00])?;
         di.write_raw(0x98, &[0x3e, 0x07])?;
 
-        di.write_command(SetInvertMode::new(options.invert_colors))?; // set color inversion
+        // Set inversion mode
+        di.write_command(dcs::SetInvertMode::new(options.invert_colors))?;
 
-        di.write_command(ExitSleepMode)?; // turn off sleep
+        // Exit sleep mode
+        di.write_command(dcs::ExitSleepMode)?;
         delay.delay_us(120_000);
 
-        di.write_command(SetDisplayOn)?; // turn on display
+        // Display on
+        di.write_command(dcs::SetDisplayOn)?;
 
         Ok(madctl)
     }

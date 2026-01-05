@@ -1,34 +1,19 @@
 [package]
 name = "esp-display-interface"
-version = "0.3.0"
+version = "0.1.0"
 edition = "2021"
-authors = [
-    "bjoernQ <bjoern.quentin@mobile-j.de>",
-    "Juraj Michálek <juraj.michalek@espressif.com>"
-]
-description = "Rust Bare Metal SPI Display Interface with DMA support for ESP32 chips"
-repository  = "https://github.com/georgik/esp-display-interface-spi-dma"
-license     = "MIT OR Apache-2.0"
+authors = ["Kamitai"]
+description = "ESP32 SPI DMA interface implementation for mipidsi-async"
+license = "MIT"
+repository = "https://github.com/Kamitai6/esp-display-interface"
+keywords = ["embedded", "esp32", "display", "spi", "dma"]
+categories = ["embedded", "no-std", "hardware-support"]
 
 [dependencies]
-byte-slice-cast = { version = "1.2", default-features = false }
-# display-interface = "0.5"
-# display-interface-spi = "0.5"
-# mipidsi = "0.9"
-mipidsi-async = {version = "0.9", path = "../mipidsi-async"}
-embedded-graphics = "0.8"
-embedded-hal = { version = "1.0" }
-embedded-dma = "0.2.0"
-num-traits = { version = "0.2", default-features = false }
+mipidsi-async = {version = "0.1", path = "../mipidsi-async"}
 esp-hal = { version = "1.0", default-features = false }
-defmt = "1.0"
 paste = "1.0"
 
 [features]
 default = []
-esp32 = [ "esp-hal/esp32" ]
-esp32c3 = [ "esp-hal/esp32c3" ]
-esp32c6 = [ "esp-hal/esp32c6" ]
-esp32s2 = [ "esp-hal/esp32s2" ]
-esp32s3 = [ "esp-hal/esp32s3" ]
 

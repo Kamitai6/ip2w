@@ -1,61 +1,63 @@
+//! ST7789 display driver.
+
 use embedded_graphics_core::pixelcolor::Rgb565;
 use embedded_hal::delay::DelayNs;
 
 use crate::{
-    dcs::{
-        BitsPerPixel, EnterNormalMode, ExitSleepMode, InterfaceExt, PixelFormat, SetAddressMode,
-        SetDisplayOn, SetInvertMode, SetPixelFormat,
-    },
-    interface::{Interface, InterfaceKind},
-    models::{Model, ModelInitError},
+    dcs::{self, InterfaceExt, SetAddressMode},
+    interface::Interface,
     options::ModelOptions,
-    ConfigurationError,
 };
 
-/// ST7789 display in Rgb565 color mode.
+use super::{InitError, Model};
+
+/// ST7789 display driver.
+///
+/// Common display sizes:
+/// - 240x240
+/// - 240x280
+/// - 240x320
+#[derive(Debug, Clone, Copy, Default)]
 pub struct ST7789;
 
 impl Model for ST7789 {
     type ColorFormat = Rgb565;
+
     const FRAMEBUFFER_SIZE: (u16, u16) = (240, 320);
 
-    fn init<DELAY, DI>(
+    fn init<DI, DELAY>(
         &mut self,
         di: &mut DI,
         delay: &mut DELAY,
         options: &ModelOptions,
-    ) -> Result<SetAddressMode, ModelInitError<DI::Error>>
+    ) -> Result<SetAddressMode, InitError<DI::Error>>
     where
-        DELAY: DelayNs,
         DI: Interface,
+        DELAY: DelayNs,
     {
-        if !matches!(
-            DI::KIND,
-            InterfaceKind::Serial4Line | InterfaceKind::Parallel8Bit | InterfaceKind::Parallel16Bit
-        ) {
-            return Err(ModelInitError::InvalidConfiguration(
-                ConfigurationError::UnsupportedInterface,
-            ));
-        }
-
         let madctl = SetAddressMode::from(options);
 
         delay.delay_us(150_000);
 
-        di.write_command(ExitSleepMode)?;
+        di.write_command(dcs::ExitSleepMode)?;
         delay.delay_us(10_000);
 
-        // set hw scroll area based on framebuffer size
+        // Memory access control
         di.write_command(madctl)?;
 
-        di.write_command(SetInvertMode::new(options.invert_colors))?;
+        // Set inversion mode
+        di.write_command(dcs::SetInvertMode::new(options.invert_colors))?;
 
-        let pf = PixelFormat::with_all(BitsPerPixel::from_rgb_color::<Self::ColorFormat>());
-        di.write_command(SetPixelFormat::new(pf))?;
+        // Set pixel format to 16-bit (RGB565)
+        di.write_command(dcs::SetPixelFormat::new(dcs::PixelFormat::Bpp16))?;
         delay.delay_us(10_000);
-        di.write_command(EnterNormalMode)?;
+
+        // Enter normal mode
+        di.write_command(dcs::EnterNormalMode)?;
         delay.delay_us(10_000);
-        di.write_command(SetDisplayOn)?;
+
+        // Display on
+        di.write_command(dcs::SetDisplayOn)?;
 
         // DISPON requires some time otherwise we risk SPI data issues
         delay.delay_us(120_000);

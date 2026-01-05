@@ -1,32 +1,22 @@
 [package]
 name = "mipidsi-async"
-description = "MIPI Display Command Set compatible generic driver"
-version = "0.9.0"
-authors = ["Ales Katona <almindor@gmail.com>"]
+version = "0.1.0"
 edition = "2021"
+authors = ["Kamitai"]
+description = "Async framebuffer display driver for MIPI DCS displays with DMA support"
 license = "MIT"
-repository = "https://github.com/almindor/mipidsi"
-keywords = ["embedded-hal-driver", "mipi", "dcs", "display"]
+repository = "https://github.com/Kamitai6/mipidsi-async"
+keywords = ["embedded", "display", "mipi", "dcs", "async", "dma"]
+categories = ["embedded", "no-std", "hardware-support"]
 readme = "README.md"
-documentation = "https://docs.rs/mipidsi"
-rust-version = "1.75"
 
 [dependencies]
-defmt = { version = "1.0.1" }
-embedded-graphics-core = "0.4.0"
-embedded-hal = "1.0.0"
-
-[dependencies.heapless]
-optional = true
-version = "0.8.0"
+embedded-graphics-core = "0.4"
+embedded-hal = "1.0"
 
 [dev-dependencies]
-embedded-graphics = "0.8.1"
+embedded-graphics = "0.8"
 
 [features]
-default = ["batch"]
-batch = ["heapless"]
-# defmt = ["dep:defmt", "embedded-hal/defmt-03"]
-
-[workspace]
-members = ["mipidsi-async"]
+default = []
+defmt = []

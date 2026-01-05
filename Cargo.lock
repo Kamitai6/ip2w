@@ -105,12 +105,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "byte-slice-cast"
-version = "1.2.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7575182f7272186991736b70173b0ea045398f984bf5ebbb3804736ce1330c9d"
-
-[[package]]
 name = "bytemuck"
 version = "1.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -398,15 +392,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "embedded-dma"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "994f7e5b5cb23521c22304927195f236813053eb9c065dd2226a32ba64695446"
-dependencies = [
- "stable_deref_trait",
-]
-
-[[package]]
 name = "embedded-graphics"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -617,16 +602,10 @@ dependencies = [
 
 [[package]]
 name = "esp-display-interface"
-version = "0.3.0"
+version = "0.1.0"
 dependencies = [
- "byte-slice-cast",
- "defmt 1.0.1",
- "embedded-dma",
- "embedded-graphics",
- "embedded-hal 1.0.0",
  "esp-hal",
  "mipidsi-async",
- "num-traits",
  "paste",
 ]
 
@@ -1217,12 +1196,10 @@ checksum = "c3c8dda44ff03a2f238717214da50f65d5a53b45cd213a7370424ffdb6fae815"
 
 [[package]]
 name = "mipidsi-async"
-version = "0.9.0"
+version = "0.1.0"
 dependencies = [
- "defmt 1.0.1",
  "embedded-graphics-core",
  "embedded-hal 1.0.0",
- "heapless 0.8.0",
 ]
 
 [[package]]

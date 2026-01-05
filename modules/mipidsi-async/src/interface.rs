@@ -15,44 +15,16 @@
 /// - `start_transfer` initiates a DMA transfer and returns immediately
 /// - `is_transfer_done` polls for completion without blocking
 /// - `finish_transfer` cleans up after transfer completes
+/// - `poll_transfer` advances chunked transfers (default impl provided)
 ///
 /// The `send_command` method may block briefly as commands are typically
 /// very short (a few bytes).
 ///
-/// # Example Implementation
+/// # Chunked Transfers
 ///
-/// ```ignore
-/// impl Interface for MySpiDma {
-///     type Error = MyError;
-///
-///     fn send_command(&mut self, command: u8, args: &[u8]) -> Result<(), Self::Error> {
-///         // Set DC pin low for command
-///         self.dc.set_low();
-///         self.spi.blocking_write(&[command])?;
-///         
-///         // Set DC pin high for data
-///         if !args.is_empty() {
-///             self.dc.set_high();
-///             self.spi.blocking_write(args)?;
-///         }
-///         Ok(())
-///     }
-///
-///     fn start_transfer(&mut self, buffer: &[u8]) -> Result<(), Self::Error> {
-///         self.dc.set_high();
-///         self.dma.start_write(buffer)?;
-///         Ok(())
-///     }
-///
-///     fn is_transfer_done(&self) -> bool {
-///         self.dma.is_done()
-///     }
-///
-///     fn finish_transfer(&mut self) {
-///         self.dma.wait_and_reclaim();
-///     }
-/// }
-/// ```
+/// For large framebuffers that need to be split into multiple DMA transfers,
+/// override `poll_transfer` to handle chunk advancement. The default
+/// implementation assumes single-shot transfers.
 pub trait Interface {
     /// Error type for interface operations.
     type Error: core::fmt::Debug;
@@ -71,24 +43,55 @@ pub trait Interface {
     /// Start an async transfer of framebuffer data.
     ///
     /// This method should return immediately after initiating the DMA transfer.
-    /// The buffer must remain valid and unchanged until `finish_transfer` is called.
+    /// The buffer must remain valid and unchanged until the transfer is complete.
+    ///
+    /// For large buffers, implementations may split the transfer into chunks.
     ///
     /// # Arguments
     ///
     /// * `buffer` - The framebuffer data to transfer (mutable for DMA compatibility)
     fn start_transfer(&mut self, buffer: &mut [u8]) -> Result<(), Self::Error>;
 
-    /// Check if the current transfer is complete.
+    /// Check if the current transfer (or chunk) is complete.
     ///
     /// This method must not block. Returns `true` if no transfer is in progress
-    /// or if the current transfer has completed.
+    /// or if the current transfer/chunk has completed and needs attention.
     fn is_transfer_done(&self) -> bool;
 
-    /// Finish the transfer and reclaim resources.
+    /// Finish the current transfer/chunk and reclaim resources.
     ///
     /// This should only be called after `is_transfer_done` returns `true`.
-    /// After calling this method, a new transfer can be started.
+    /// For chunked transfers, this may start the next chunk.
     fn finish_transfer(&mut self);
+
+    /// Check if the interface is completely idle (all transfers done).
+    ///
+    /// For single-shot transfers, this is the same as `is_transfer_done`.
+    /// For chunked transfers, this returns `true` only when all chunks are complete.
+    ///
+    /// Default implementation returns `is_transfer_done()`.
+    fn is_idle(&self) -> bool {
+        self.is_transfer_done()
+    }
+
+    /// Poll and advance the transfer.
+    ///
+    /// This method should be called periodically during a transfer.
+    /// It checks if the current transfer/chunk is done and advances to the next
+    /// chunk if needed.
+    ///
+    /// Returns `true` if the entire transfer is complete (interface is idle).
+    ///
+    /// Default implementation handles single-shot transfers.
+    /// Override for chunked transfer support.
+    fn poll_transfer(&mut self) -> bool {
+        if self.is_transfer_done() {
+            self.finish_transfer();
+            self.is_idle()
+        } else {
+            false
+        }
+    }
 }
 
 /// Calculate the required buffer size for a display.
