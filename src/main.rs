@@ -14,11 +14,16 @@ use defmt::info;
 use {esp_backtrace as _, esp_println as _};
 
 use esp_hal::{
-    clock::CpuClock, delay::Delay, gpio::{Event, Input, InputConfig, Io, Level, Output, OutputConfig, Pull}, handler, lcd_cam::lcd, main, time::{Duration, Instant, Rate}, timer::{Timer, timg::{Timer as Timg, TimerGroup}}
+    clock::CpuClock, 
+    delay::Delay, 
+    gpio::{Event, Input, InputConfig, Io, Level, Output, OutputConfig, Pull}, 
+    handler, 
+    main, 
+    time::{Duration, Instant, Rate}, 
+    timer::{Timer, timg::{Timer as Timg, TimerGroup}},
+    i2c::master::{I2c, Config as I2cConfig},
+    spi::{master::{Spi, Config as SpiConfig}, Mode as SpiMode},
 };
-use esp_bsp::{lcd_spi, lcd_backlight_init, 
-    // lcd_display_interface, lcd_display, 
-    i2c0_init, i2c1_init, BoardType, DisplayConfig};
 use embedded_graphics::{
     prelude::{IntoStorage, RgbColor, Point, DrawTarget, Primitive},
     pixelcolor::Rgb565,
@@ -33,7 +38,11 @@ use embedded_graphics::{
 use embedded_hal_bus::i2c::{RefCellDevice as I2cRefCellDevice};
 use atom::{atom_motion, bmi270, lp5562};
 use control::{fb::{pid, smc}, ff::{gravity, pos_regulator}, util::{imu_ekf, deadzone}};
-use mipidsi_async::{Builder, models::{GC9107, ST7789}, options::{ColorInversion, ColorOrder, Orientation, RefreshOrder, Rotation, VerticalRefreshOrder, HorizontalRefreshOrder}};
+use mipidsi_async::{
+    Builder, 
+    models::{GC9107, ST7789}, 
+    options::{ColorInversion, ColorOrder, Orientation, RefreshOrder, Rotation, VerticalRefreshOrder, HorizontalRefreshOrder}
+};
 use esp_display_interface::{dma_resources, DmaSpiInterface};
 
 mod events;
@@ -66,16 +75,21 @@ fn main() -> ! {
     let mut delay = Delay::new();
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     let timg1 = TimerGroup::new(peripherals.TIMG1);
-    let mut wdt0 = timg0.wdt;
-    wdt0.disable();
-    let mut wdt1 = timg1.wdt;
-    wdt1.disable();
+    // let mut wdt0 = timg0.wdt;
+    // wdt0.disable();
+    // let mut wdt1 = timg1.wdt;
+    // wdt1.disable();
 
     let button = Input::new(peripherals.GPIO41, InputConfig::default().with_pull(Pull::Up));
 
     //IR GPIO47
 
-    let i2c0 = i2c0_init!(peripherals);
+    let i2c0 = I2c::new(peripherals.I2C0, 
+        I2cConfig::default()
+            .with_frequency(Rate::from_khz(800))
+        ).unwrap()
+            .with_sda(peripherals.GPIO45)
+            .with_scl(peripherals.GPIO0);
     let i2c0_ref_cell = RefCell::new(i2c0);
 
     // LP5562
@@ -100,14 +114,13 @@ fn main() -> ! {
     ).unwrap();
 
     /* calibration */
-    // imu.perform_acc_foc(bmi270::FocAccConfig::z_up(), |us| delay.delay_micros(us)).unwrap();
+    // imu.calibrate_acc(bmi270::FocAccConfig::z_up(), |us| delay.delay_micros(us)).unwrap();
     // let (ax, ay, az) = imu.read_acc_offset();
     // info!("AccelOffset: x={}, y={}, z={}", ax, ay, az);
     imu.write_acc_offset((33, -123, -144));
     /* always calibration */
-    imu.perform_gyr_foc(|us| delay.delay_micros(us)).unwrap();
+    imu.calibrate_gyro(|us| delay.delay_micros(us)).unwrap();
 
-    // kalman
     let mut ekf = imu_ekf::ImuEkf::new(
         imu_ekf::EkfConfig {
             dt: DT,
@@ -119,32 +132,27 @@ fn main() -> ! {
             ..Default::default()
     });
 
-    let i2c1 = i2c1_init!(peripherals);
+    let i2c1 = I2c::new(peripherals.I2C1, 
+        I2cConfig::default()
+            .with_frequency(Rate::from_khz(800))
+        ).unwrap()
+            .with_sda(peripherals.GPIO38)
+            .with_scl(peripherals.GPIO39);
     let i2c1_ref_cell = RefCell::new(i2c1);
 
-    // Atom Motion motor driver
     let mut motion = atom_motion::AtomMotion::new(I2cRefCellDevice::new(&i2c1_ref_cell));
 
-    // ラムダ(P)は上げ過ぎると発散するから、するところまで上げて、しないギリギリまで下げる
-    // アルファ(I)は外乱が大きいほど高くしないといけないから、小さい値からはじめて、ギリギリ外乱に耐えられるまで上げる
-    // C(D)も上げ過ぎると発振するから、震えるまで上げて、しないギリギリまで下げる
-    // 多分、ラムダとCを適当な値にして、ラムダかCをいい感じに上げながら最適化できそうなほうから合わせて、
-    // 片方には強い感じまでやったら、アルファを上げてオフセットなどのモデル誤差を含めた外乱をすべて除けるようにしたら完成
-    let mut smc = smc::SuperTwistingSMC::new(DT, 200.0, 800.0, 25.0)
-        .with_smoothing(0.1, 0.00001) //やっぱりこれもちゃんと設定しないとダメみたい。1.0や0.01よりも0.1のほうが明らかに良い
-        .with_v_regulation(U_MAX * 0.8, 0.00001);
+    let lcd_spi = Spi::new(
+            peripherals.SPI2,
+            SpiConfig::default()
+                .with_frequency(Rate::from_mhz(80))
+                .with_mode(SpiMode::_0)
+        ).unwrap()
+            .with_sck(peripherals.GPIO15)
+            .with_mosi(peripherals.GPIO21)
+            .with_cs(peripherals.GPIO14)
+            .with_dma(peripherals.DMA_CH0);
 
-    let mut gravity = gravity::GravityCompensator::new(0.1, 0.035, 500.0);
-    let mut pos_regulator = pos_regulator::PositionRegulator::new(DT, 50.0, 0.1, 0.1)
-        .with_lead(-0.001)
-        .with_lowpass(5.0) //Hz
-        ;
-
-    let mut yaw_pid = pid::PID::new(DT, 0.0, 0.0, 20.0);
-
-    let lcd_spi = lcd_spi!(peripherals);
-    // let di = lcd_display_interface!(peripherals, lcd_spi);
-    // let mut display = lcd_display!(peripherals, di, &mut delay).unwrap();
     let lcd_dc = esp_hal::gpio::Output::new(
         peripherals.GPIO42, 
         esp_hal::gpio::Level::Low, 
@@ -177,6 +185,22 @@ fn main() -> ! {
             .init(&mut delay, &raw mut DISPLAY_FB_A, &raw mut DISPLAY_FB_B)
             .unwrap()
     };
+
+    // ラムダ(P)は上げ過ぎると発散するから、するところまで上げて、しないギリギリまで下げる
+    // アルファ(I)は外乱が大きいほど高くしないといけないから、小さい値からはじめて、ギリギリ外乱に耐えられるまで上げる
+    // C(D)も上げ過ぎると発振するから、震えるまで上げて、しないギリギリまで下げる
+    // 多分、ラムダとCを適当な値にして、ラムダかCをいい感じに上げながら最適化できそうなほうから合わせて、
+    // 片方には強い感じまでやったら、アルファを上げてオフセットなどのモデル誤差を含めた外乱をすべて除けるようにしたら完成
+    let mut smc = smc::SuperTwistingSMC::new(DT, 200.0, 800.0, 25.0)
+        .with_smoothing(0.1, 0.00001) //やっぱりこれもちゃんと設定しないとダメみたい。1.0や0.01よりも0.1のほうが明らかに良い
+        .with_v_regulation(U_MAX * 0.8, 0.00001);
+
+    let mut gravity = gravity::GravityCompensator::new(0.1, 0.035, 500.0);
+    let mut pos_regulator = pos_regulator::PositionRegulator::new(DT, 50.0, 0.1, 0.1)
+        .with_lead(-0.001)
+        .with_lowpass(5.0);
+
+    let mut yaw_pid = pid::PID::new(DT, 0.0, 0.0, 20.0);
     
     // esp_rtos::start(timg0.timer0);
     // let radio_init = esp_radio::init().expect("Failed to initialize Wi-Fi/BLE controller");
@@ -201,11 +225,8 @@ fn main() -> ! {
     let mut m2_pwm = 0;
     let mut target_angle = 0.0;
 
-    // 目の初期化 (画面中央付近に2つ配置)
     let mut left_eye = eye::Eye::new(32, 64, 22);
     let mut right_eye = eye::Eye::new(96, 64, 22);
-
-    // アニメーション用変数
     let mut offset_x = 0;
     let mut direction = 1;
 
@@ -259,25 +280,23 @@ fn main() -> ! {
                         let _ = motion.set_motor(atom_motion::MotorChannel::M2, m2_pwm);
                     }
                     events::Event::DisplayUpdate => {
-                        // 2. 視線の更新（左右に動く）
-                        // offset_x += direction * 2;
-                        // if offset_x > 12 || offset_x < -12 {
-                        //     direction *= -1;
-                        // }
-
-                        // left_eye.look_at(offset_x, 0);
-                        // right_eye.look_at(offset_x, 0);
-
-                        // // 3. 描画
-                        // left_eye.draw(&mut display).unwrap();
-                        // right_eye.draw(&mut display).unwrap();
-
                         if display.is_idle() {
                             display.clear(Rgb565::BLACK).unwrap();
 
-                            let _ = Text::with_alignment("HELLO WORLD!", Point::new(64, 64), MonoTextStyleBuilder::new().font(&FONT_10X20).text_color(RgbColor::WHITE).build(),  Alignment::Center)
-                                .draw(&mut display);
-                                
+                            // let _ = Text::with_alignment("HELLO WORLD!", Point::new(64, 64), MonoTextStyleBuilder::new().font(&FONT_10X20).text_color(RgbColor::WHITE).build(),  Alignment::Center)
+                            //     .draw(&mut display);
+                            // 2. 視線の更新（左右に動く）
+                            offset_x += direction * 2;
+                            if offset_x > 12 || offset_x < -12 {
+                                direction *= -1;
+                            }
+
+                            left_eye.look_at(offset_x, 0);
+                            right_eye.look_at(offset_x, 0);
+
+                            // 3. 描画
+                            left_eye.draw(&mut display).unwrap();
+                            right_eye.draw(&mut display).unwrap();
 
                             display.flush_async().unwrap();
                         }

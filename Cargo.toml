@@ -19,7 +19,6 @@ esp-radio = { version = "0.17", features = [
   "wifi",
 ] }
 esp-display-interface = { path = "./modules/esp-display-interface"}
-esp-bsp = {features = ["m5atom-s3r"], path = "./modules/esp-bsp"}
 
 embedded-hal = "1.0"
 embedded-io = { version = "0.7", features = ["defmt"] }

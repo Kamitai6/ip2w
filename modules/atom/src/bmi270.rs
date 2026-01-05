@@ -636,18 +636,14 @@ impl<I2C: I2c> Bmi270<I2C> {
         self.gyr_range
     }
 
-    // ========================================================================
-    // FOC (Fast Offset Compensation) Methods
-    // ========================================================================
-
-    /// Perform accelerometer offset calibration (software-based)
+    /// Accelerometer offset calibration (software-based)
     ///
     /// Sensor must be stationary in a known orientation during calibration.
     /// Takes ~1s to complete (1000 samples).
     ///
     /// # Arguments
     /// * `delay` - Delay function taking microseconds [µs]
-    pub fn perform_acc_foc<D: FnMut(u32)>(
+    pub fn calibrate_acc<D: FnMut(u32)>(
         &mut self,
         config: FocAccConfig,
         mut delay: D,
@@ -706,14 +702,14 @@ impl<I2C: I2c> Bmi270<I2C> {
         Ok(())
     }
 
-    /// Perform gyroscope offset calibration (software-based)
+    /// Gyroscope offset calibration (software-based)
     ///
     /// Sensor must be completely stationary during calibration.
     /// Takes ~1s to complete (1000 samples).
     ///
     /// # Arguments
     /// * `delay` - Delay function taking microseconds [µs]
-    pub fn perform_gyr_foc<D: FnMut(u32)>(
+    pub fn calibrate_gyro<D: FnMut(u32)>(
         &mut self,
         mut delay: D,
     ) -> Result<(), Error<I2C::Error>> {
@@ -749,17 +745,17 @@ impl<I2C: I2c> Bmi270<I2C> {
         Ok(())
     }
 
-    /// Perform both accelerometer and gyroscope offset calibration
+    /// Accelerometer and Gyroscope offset calibration
     ///
     /// # Arguments
     /// * `delay` - Delay function taking microseconds [µs]
-    pub fn perform_foc<D: FnMut(u32)>(
+    pub fn calibrate_all<D: FnMut(u32)>(
         &mut self,
         acc_config: FocAccConfig,
         mut delay: D,
     ) -> Result<(), Error<I2C::Error>> {
-        self.perform_acc_foc(acc_config, &mut delay)?;
-        self.perform_gyr_foc(&mut delay)?;
+        self.calibrate_acc(acc_config, &mut delay)?;
+        self.calibrate_gyro(&mut delay)?;
         Ok(())
     }
 

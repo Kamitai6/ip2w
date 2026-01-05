@@ -584,10 +584,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "esp-bsp"
-version = "0.5.0"
-
-[[package]]
 name = "esp-config"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1095,7 +1091,6 @@ dependencies = [
  "esp-alloc",
  "esp-backtrace",
  "esp-bootloader-esp-idf",
- "esp-bsp",
  "esp-display-interface",
  "esp-hal",
  "esp-println",

@@ -11,10 +11,6 @@
 /// a conversion factor `k_pwm` is needed to map torque to PWM values.
 #[derive(Debug, Clone, Copy)]
 pub struct GravityCompensator {
-    /// Mass of the pendulum [kg]
-    mass: f32,
-    /// Distance from pivot to center of mass [m]
-    length: f32,
     /// PWM conversion factor [PWM/Nm]
     k_pwm: f32,
     /// Precomputed: mass * g * length
@@ -39,8 +35,6 @@ impl GravityCompensator {
     pub fn new(mass: f32, length: f32, k_pwm: f32) -> Self {
         let tau_max = mass * Self::G * length;
         Self {
-            mass,
-            length,
             k_pwm,
             tau_max,
         }
