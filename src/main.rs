@@ -188,21 +188,20 @@ fn main() -> ! {
 
     let mut face = face::Face::new(Point::new(64, 64), 50, 30);
 
-    // ラムダ(P)は上げ過ぎると発散するから、するところまで上げて、しないギリギリまで下げる
-    // アルファ(I)は外乱が大きいほど高くしないといけないから、小さい値からはじめて、ギリギリ外乱に耐えられるまで上げる
-    // C(D)も上げ過ぎると発振するから、震えるまで上げて、しないギリギリまで下げる
-    // 多分、ラムダとCを適当な値にして、ラムダかCをいい感じに上げながら最適化できそうなほうから合わせて、
-    // 片方には強い感じまでやったら、アルファを上げてオフセットなどのモデル誤差を含めた外乱をすべて除けるようにしたら完成
-    let mut smc = smc::SuperTwistingSMC::new(DT, 200.0, 800.0, 25.0)
-        .with_smoothing(0.1, 0.00001) //やっぱりこれもちゃんと設定しないとダメみたい。1.0や0.01よりも0.1のほうが明らかに良い
-        .with_v_regulation(U_MAX * 0.8, 0.00001);
+    // ラムダ(P)上げ過ぎると発散する
+    // アルファ(I)外乱が大きいほど高くしないといけない
+    // C(D)上げ過ぎると発振する
+    let mut smc = smc::SuperTwistingSMC::new(DT, 200.0, 1000.0, 25.0)
+        .with_smoothing(0.01)
+        .with_v_regulation(U_MAX * 0.8);
 
-    let mut gravity = gravity::GravityCompensator::new(0.1, 0.035, 500.0);
-    let mut pos_regulator = pos_regulator::PositionRegulator::new(DT, 50.0, 0.1, 0.1)
-        .with_lead(-0.001)
+    let mut gravity = gravity::GravityCompensator::new(0.1, 0.035, 5000.0);
+    let mut pos_regulator = pos_regulator::PositionRegulator::new(DT, 100.0, 0.1)
+        .with_lead(0.001)
+        .with_max(45.0, 5.0)
         .with_lowpass(5.0);
 
-    let mut yaw_pid = pid::PID::new(DT, 0.0, 0.0, 20.0);
+    let mut yaw_pid = pid::PID::new(DT, 1.0, 0.0, 20.0);
     
     // esp_rtos::start(timg0.timer0);
     // let radio_init = esp_radio::init().expect("Failed to initialize Wi-Fi/BLE controller");
