@@ -25,7 +25,7 @@ use esp_hal::{
     spi::{master::{Spi, Config as SpiConfig}, Mode as SpiMode},
 };
 use embedded_graphics::{
-    prelude::{IntoStorage, RgbColor, Point, DrawTarget, Primitive},
+    prelude::{IntoStorage, RgbColor, Point, Size, DrawTarget, Primitive},
     pixelcolor::Rgb565,
     mono_font::{
         ascii::FONT_10X20,
@@ -186,7 +186,7 @@ fn main() -> ! {
             .unwrap()
     };
 
-    let mut face = face::Face::new(Point::new(64, 64), 50, 20);
+    let mut face = face::Face::new(Point::new(64, 64), 50, 30);
 
     // ラムダ(P)は上げ過ぎると発散するから、するところまで上げて、しないギリギリまで下げる
     // アルファ(I)は外乱が大きいほど高くしないといけないから、小さい値からはじめて、ギリギリ外乱に耐えられるまで上げる
@@ -255,7 +255,7 @@ fn main() -> ! {
                             let ff = -gravity.update(now_angle);
                             let atom_max = atom_motion::MOTOR_SPEED_MAX as f32;
                             let base_out = deadzone::apply_deadzone(fb + ff, U_MAX, 30.0, atom_max); //(限界-5)程度にするのが最適っぽいな
-                            
+
                             let yaw_e = 0.0 - state.yaw;
                             let yaw_e_dot = 0.0 - gz;
                             let yaw_result = yaw_pid.update_with_d(yaw_e, yaw_e_dot);
@@ -275,12 +275,23 @@ fn main() -> ! {
                         }
                         let _ = motion.set_motor(atom_motion::MotorChannel::M1, m1_pwm);
                         let _ = motion.set_motor(atom_motion::MotorChannel::M2, m2_pwm);
+
+                        let counter = critical_section::with(|cs| {
+                            TIMER_COUNTER.borrow(cs).get()
+                        });
+                        if counter % (FREQUENCY / 2) == 0 { //0.5s
+                            let emotion = if drive {
+                                face::Emotion::UPPER[pseudo_rand(face::Emotion::UPPER.len())]
+                            } else {
+                                face::Emotion::LOWER[pseudo_rand(face::Emotion::LOWER.len())]
+                            };
+                            face.set_emotion(emotion);
+                        }
                     }
                     events::Event::DisplayUpdate => {
                         if display.is_idle() {
                             display.clear(Rgb565::BLACK).unwrap();
 
-                            face.set_emotion(face::Emotion::Neutral);
                             face.update(&mut display, DT * 10.0).unwrap();
 
                             display.flush_async().unwrap();
@@ -311,4 +322,11 @@ fn tg0_t0_handler() {
             TIMER_COUNTER.borrow(cs).set(counter + 1);
         }
     });
+}
+
+fn pseudo_rand(idx_max: usize) -> usize {
+    with(|cs| {
+        let c = TIMER_COUNTER.borrow(cs).get();
+        (c as usize) % idx_max
+    })
 }
