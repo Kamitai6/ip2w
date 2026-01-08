@@ -66,6 +66,7 @@ impl<I2C: I2c> Lp5562<I2C> {
     pub fn init<D: FnMut(u32)>(&mut self, mut delay: D) -> Result<(), I2C::Error> {
         // Reset the device
         self.reset()?;
+        delay(2000);
         // Enable chip
         self.enable()?;
         delay(500); // T_su(ENABLE) > 488us

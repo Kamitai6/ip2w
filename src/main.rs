@@ -36,7 +36,7 @@ use embedded_graphics::{
     primitives::{Circle, PrimitiveStyle},
 };
 use embedded_hal_bus::i2c::{RefCellDevice as I2cRefCellDevice};
-use atom::{atom_motion, bmi270, lp5562};
+use atom::{atom_motion, bmi270, bmm150, lp5562};
 use control::{fb::{pid, smc}, ff::{gravity, pos_regulator}, util::{imu_ekf, deadzone}};
 use mipidsi_async::{
     Builder, 
@@ -99,7 +99,8 @@ fn main() -> ! {
     lp5562.set_pwm(lp5562::Channel::White, 255).unwrap(); // 白色点灯
 
     // Initialize IMU
-    let mut imu = bmi270::Bmi270::new(I2cRefCellDevice::new(&i2c0_ref_cell));
+    let mut imu = bmi270::Bmi270::new(I2cRefCellDevice::new(&i2c0_ref_cell))
+        .with_mag(bmm150::Preset::Regular);
     imu.init_with_config(
         bmi270::Config {
             acc_odr: bmi270::AccOdr::Hz800,
@@ -109,6 +110,7 @@ fn main() -> ! {
             acc_bwp: bmi270::AccBwp::Normal,
             gyr_bwp: bmi270::GyrBwp::Normal,
             perf_mode: bmi270::PerfMode::PerfOpt,
+            aux_odr: bmi270::AuxOdr::Hz800,
         }, 
         &mut |us| delay.delay_micros(us)
     ).unwrap();
@@ -235,6 +237,8 @@ fn main() -> ! {
                     events::Event::MotionUpdate => {
                         let (ax, ay, az) = imu.read_accel().unwrap(); // g単位
                         let (gx, gy, gz) = imu_ekf::degree_to_rad(imu.read_gyro().unwrap()); // rad/s単位
+                        let (mx, my, mz) = imu.read_mag().unwrap().unwrap();
+                        info!("{}, {}, {}", mx, my, mz);
                         let state = ekf.update_x_up(ax, ay, az, gx, gy, gz);
 
                         if button.is_low() && !button_state  {
