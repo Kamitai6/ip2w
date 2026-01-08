@@ -465,14 +465,12 @@ impl<I2C: I2c> Bmi270<I2C> {
         // Initialize magnetometer if configured
         if self.mag.is_some() {
             pwr |= pwr_ctrl::AUX_EN;
-            self.write_reg(reg::PWR_CTRL, pwr)?;
-            delay(500);
             self.write_reg(reg::IF_CONF, 0x20)?;
             self.init_mag(delay, config)?;
-        } else {
-            self.write_reg(reg::PWR_CTRL, pwr)?;
-            delay(500);
-        }
+        } 
+
+        self.write_reg(reg::PWR_CTRL, pwr)?;
+        delay(500);
 
         // Set normal power mode
         self.write_reg(reg::PWR_CONF, 0x00)?;
@@ -504,19 +502,19 @@ impl<I2C: I2c> Bmi270<I2C> {
 
         // Verify BMM150 chip ID
         let chip_id = self.aux_read(bmm150::reg::CHIP_ID, delay)?;
-        defmt::info!("{}", chip_id);
         if chip_id != bmm150::CHIP_ID {
             self.mag = None;
             return Err(Error::MagInitFailed);
         }
 
+        // Set normal mode
+        let op_mode = (bmm150::DataRate::Hz30 as u8) << 3 | (bmm150::OpMode::Normal as u8) << 1;
+        self.aux_write(bmm150::reg::OP_MODE, op_mode, delay)?;
+
         // Set repetitions
         let (rep_xy, rep_z) = preset.repetitions();
         self.aux_write(bmm150::reg::REP_XY, rep_xy, delay)?;
         self.aux_write(bmm150::reg::REP_Z, rep_z, delay)?;
-
-        // Set normal mode
-        self.aux_write(bmm150::reg::OP_MODE, bmm150::OpMode::Normal as u8, delay)?;
 
         // Read trim data
         let trim = self.read_mag_trim(delay)?;
@@ -594,7 +592,7 @@ impl<I2C: I2c> Bmi270<I2C> {
 
     fn aux_read<D: FnMut(u32)>(&mut self, bmm_reg: u8, delay: &mut D) -> Result<u8, I2C::Error> {
         self.write_reg(reg::AUX_RD, bmm_reg)?;
-        delay(1000); // 1ms (これマジ大事らしい)
+        delay(1000); // 1ms (これマジ大事)
         self.read_reg(reg::AUX_X_LSB)
     }
 
@@ -743,20 +741,6 @@ impl<I2C: I2c> Bmi270<I2C> {
             raw.y as f32 / sens,
             raw.z as f32 / sens,
         ))
-    }
-
-    /// Read magnetometer data [µT] (returns None if mag not enabled)
-    pub fn read_mag(&mut self) -> Result<Option<(f32, f32, f32)>, I2C::Error> {
-        if self.mag.is_none() {
-            return Ok(None);
-        }
-
-        let mut buf = [0u8; 8];
-        self.read_regs(reg::AUX_X_LSB, &mut buf)?;
-
-        let mag = self.mag.as_ref().unwrap();
-        let m = mag.parse_data(&buf);
-        Ok(Some((m.x, m.y, m.z)))
     }
 
     /// Read temperature [°C]

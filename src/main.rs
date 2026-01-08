@@ -227,6 +227,7 @@ fn main() -> ! {
     let mut m1_pwm = 0;
     let mut m2_pwm = 0;
     let mut target_angle = 0.0;
+    let mut counter = 0;
 
     info!("Start!");
     loop {
@@ -235,10 +236,15 @@ fn main() -> ! {
             while let Some(event) = events::get_event() {
                 match event {
                     events::Event::MotionUpdate => {
-                        let (ax, ay, az) = imu.read_accel().unwrap(); // g単位
-                        let (gx, gy, gz) = imu_ekf::degree_to_rad(imu.read_gyro().unwrap()); // rad/s単位
-                        let (mx, my, mz) = imu.read_mag().unwrap().unwrap();
-                        info!("{}, {}, {}", mx, my, mz);
+                        let d = imu.read_immu().unwrap();
+                        let (ax, ay, az) = (d.accel.x, d.accel.y, d.accel.z);
+                        let (gx, gy, gz) = (d.gyro.x, d.gyro.y, d.gyro.z);
+                        let mag = d.mag.unwrap();
+                        let (mx, my, mz) = (mag.x, mag.y, mag.z);
+                        if counter % 10 == 0 {
+                            info!("{}, {}, {}", mx, my, mz);
+                        }
+                        counter += 1;
                         let state = ekf.update_x_up(ax, ay, az, gx, gy, gz);
 
                         if button.is_low() && !button_state  {
