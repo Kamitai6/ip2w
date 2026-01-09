@@ -272,6 +272,8 @@ impl TrimData {
 pub struct Bmm150Aux {
     trim: TrimData,
     preset: Preset,
+    data_rate: DataRate,
+    op_mode: OpMode,
 }
 
 impl Bmm150Aux {
@@ -281,11 +283,21 @@ impl Bmm150Aux {
     }
 
     /// Create with specific preset
-    pub fn with_preset(preset: Preset) -> Self {
-        Self {
-            trim: TrimData::default(),
-            preset,
-        }
+    pub fn with_preset(mut self, preset: Preset) -> Self {
+        self.preset = preset;
+        self
+    }
+
+    /// Create with specific preset
+    pub fn with_data_rate(mut self, data_rate: DataRate) -> Self {
+        self.data_rate = data_rate;
+        self
+    }
+
+    /// Create with specific preset
+    pub fn with_op_mode(mut self, op_mode: OpMode) -> Self {
+        self.op_mode = op_mode;
+        self
     }
 
     /// Get preset
@@ -293,14 +305,14 @@ impl Bmm150Aux {
         self.preset
     }
 
-    /// Set trim data (call after reading from device)
-    pub fn set_trim(&mut self, trim: TrimData) {
-        self.trim = trim;
-    }
-
     /// Get trim data reference
     pub fn trim(&self) -> &TrimData {
         &self.trim
+    }
+
+    /// Set trim data (call after reading from device)
+    pub fn set_trim(&mut self, trim: TrimData) {
+        self.trim = trim;
     }
 
     /// Parse and compensate raw bytes to Mag [µT]

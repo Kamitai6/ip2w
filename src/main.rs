@@ -94,13 +94,18 @@ fn main() -> ! {
 
     // LP5562
     let mut lp5562 = lp5562::Lp5562::new(I2cRefCellDevice::new(&i2c0_ref_cell));
+    // なぜかよくパニックするので、あとで守勢しなければ
     lp5562.init(&mut |us| delay.delay_micros(us)).unwrap();
     lp5562.set_current(lp5562::Channel::White, 255).unwrap();
     lp5562.set_pwm(lp5562::Channel::White, 255).unwrap(); // 白色点灯
 
     // Initialize IMU
     let mut imu = bmi270::Bmi270::new(I2cRefCellDevice::new(&i2c0_ref_cell))
-        .with_mag(bmm150::Preset::Regular);
+        .with_mag(
+            bmm150::OpMode::Normal,
+            bmm150::DataRate::Hz30,
+            bmm150::Preset::Regular,
+        );
     imu.init_with_config(
         bmi270::Config {
             acc_odr: bmi270::AccOdr::Hz800,
@@ -110,7 +115,7 @@ fn main() -> ! {
             acc_bwp: bmi270::AccBwp::Normal,
             gyr_bwp: bmi270::GyrBwp::Normal,
             perf_mode: bmi270::PerfMode::PerfOpt,
-            aux_odr: bmi270::AuxOdr::Hz800,
+            aux_odr: bmi270::AuxOdr::Hz50, //30Hzなので、これ以上上げると死ぬ
         }, 
         &mut |us| delay.delay_micros(us)
     ).unwrap();
@@ -227,7 +232,6 @@ fn main() -> ! {
     let mut m1_pwm = 0;
     let mut m2_pwm = 0;
     let mut target_angle = 0.0;
-    let mut counter = 0;
 
     info!("Start!");
     loop {
@@ -241,10 +245,8 @@ fn main() -> ! {
                         let (gx, gy, gz) = (d.gyro.x, d.gyro.y, d.gyro.z);
                         let mag = d.mag.unwrap();
                         let (mx, my, mz) = (mag.x, mag.y, mag.z);
-                        if counter % 10 == 0 {
-                            info!("{}, {}, {}", mx, my, mz);
-                        }
-                        counter += 1;
+                        // info!("{}, {}, {}", ax, ay, az);
+                        info!("{}, {}, {}", mx, my, mz);
                         let state = ekf.update_x_up(ax, ay, az, gx, gy, gz);
 
                         if button.is_low() && !button_state  {

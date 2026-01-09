@@ -397,6 +397,7 @@ macro_rules! dma_resources {
     ($prefix:ident, $width:expr, $height:expr) => {
         $crate::paste! {
             /// DMA descriptors (8 for chunked transfer)
+            // #[repr(C, align(4))]
             static mut [<$prefix _DESC>]: [esp_hal::dma::DmaDescriptor; 8] =
                 [esp_hal::dma::DmaDescriptor::EMPTY; 8];
             

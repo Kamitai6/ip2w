@@ -69,7 +69,7 @@ impl<I2C: I2c> Lp5562<I2C> {
         delay(2000);
         // Enable chip
         self.enable()?;
-        delay(500); // T_su(ENABLE) > 488us
+        delay(1000); // T_su(ENABLE) > 488us
         // Use internal clock, set PWM frequency to 558Hz
         self.write_reg(reg::CONFIG, 0x01)?;
         // Map all LEDs to direct PWM control

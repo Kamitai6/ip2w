@@ -4,7 +4,7 @@
 //! Supports accelerometer and gyroscope with configurable ranges and ODR.
 
 use embedded_hal::i2c::I2c;
-use crate::bmm150::{self, Bmm150Aux, Mag, Preset as MagPreset, RawData as MagRawData, TrimData};
+use crate::bmm150::{self, Bmm150Aux, DataRate, OpMode, Mag, Preset as MagPreset, RawData as MagRawData, TrimData};
 
 /// BMI270 I2C address when SDO is connected to GND
 pub const ADDR_SDO_LOW: u8 = 0x68;
@@ -411,8 +411,11 @@ impl<I2C: I2c> Bmi270<I2C> {
     }
 
     /// Create new BMI270 driver with BMM150 magnetometer
-    pub fn with_mag(mut self, mag_preset: MagPreset) -> Self {
-        self.mag = Some(Bmm150Aux::with_preset(mag_preset));
+    pub fn with_mag(mut self, mode: OpMode, rate: DataRate, preset: MagPreset) -> Self {
+        self.mag = Some(Bmm150Aux::new()
+                            .with_op_mode(mode)
+                            .with_data_rate(rate)
+                            .with_preset(preset));
         self
     }
 
@@ -488,7 +491,6 @@ impl<I2C: I2c> Bmi270<I2C> {
         self.write_reg(reg::AUX_IF_TRIM, 0x03)?; // 0x02 10kΩ, 0x03 2kΩ
         self.write_reg(reg::AUX_CONF, config.aux_odr as u8)?;
         self.write_reg(reg::AUX_DEV_ID, bmm150::DEFAULT_ADDR << 1)?;
-        self.write_reg(reg::AUX_RD, bmm150::reg::DATA_X_LSB)?;
         self.write_reg(reg::AUX_IF_CONF, 0x80 | 0x40 | 0x0F)?; // manual_en, fcu_write_en, rd_burst
         delay(500);
 
@@ -522,6 +524,7 @@ impl<I2C: I2c> Bmi270<I2C> {
             mag.set_trim(trim);
         }
 
+        self.write_reg(reg::AUX_RD, bmm150::reg::DATA_X_LSB)?; // 直前に送ったやつが、自動で読むレジスタになるらしい
         self.write_reg(reg::AUX_IF_CONF, 0x40 | 0x0F)?; // manual_en=false
         delay(500);
 
@@ -594,6 +597,12 @@ impl<I2C: I2c> Bmi270<I2C> {
         self.write_reg(reg::AUX_RD, bmm_reg)?;
         delay(1000); // 1ms (これマジ大事)
         self.read_reg(reg::AUX_X_LSB)
+    }
+
+    fn aux_read_buf<D: FnMut(u32)>(&mut self, bmm_reg: u8, buf: &mut [u8], delay: &mut D) -> Result<(), I2C::Error> {
+        self.write_reg(reg::AUX_RD, bmm_reg)?;
+        delay(1000); // 1ms (これマジ大事)
+        self.read_regs(reg::AUX_X_LSB, buf)
     }
 
     /// Read raw accelerometer data with offset compensation [LSB]
@@ -789,8 +798,11 @@ impl<I2C: I2c> Bmi270<I2C> {
     }
 
     /// Enable magnetometer after construction
-    pub fn enable_mag(&mut self, preset: MagPreset) {
-        self.mag = Some(Bmm150Aux::with_preset(preset));
+    pub fn enable_mag(&mut self, mode: OpMode, rate: DataRate, preset: MagPreset) {
+        self.mag = Some(Bmm150Aux::new()
+                            .with_op_mode(mode)
+                            .with_data_rate(rate)
+                            .with_preset(preset));
     }
 
     /// Disable magnetometer
