@@ -300,13 +300,13 @@ fn main() -> ! {
                         }
                     }
                     events::Event::DisplayUpdate => {
-                        if display.is_idle() {
-                            display.clear(Rgb565::BLACK).unwrap();
+                        // if display.is_idle() {
+                        //     display.clear(Rgb565::BLACK).unwrap();
 
-                            face.update(&mut display, DT * 10.0).unwrap();
+                        //     face.update(&mut display, DT * 10.0).unwrap();
 
-                            display.flush_async().unwrap();
-                        }
+                        //     display.flush_async().unwrap();
+                        // }
                     }
                 }
             }
