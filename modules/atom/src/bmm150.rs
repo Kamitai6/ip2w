@@ -140,6 +140,14 @@ pub struct RawData {
     pub rhall: u16,
 }
 
+/// Compensated magnetometer data [16LSB/µT]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MagData {
+    pub x: i16,
+    pub y: i16,
+    pub z: i16,
+}
+
 /// Compensated magnetometer data [µT]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Mag {
@@ -148,22 +156,53 @@ pub struct Mag {
     pub z: f32,
 }
 
+/// Overflow ADC value for X/Y axes
+const OVERFLOW_ADCVAL_XYAXES_FLIP: i16 = -4096;
+/// Overflow ADC value for Z axis (hall overflow)
+const OVERFLOW_ADCVAL_ZAXIS_HALL: i16 = -16384;
+/// Overflow output value
+const OVERFLOW_OUTPUT: i16 = -32768;
+const OVERFLOW_OUTPUT_FLOAT: f32 = 0.0;
+
+const NEGATIVE_SATURATION_Z: i16 = -32767;
+const POSITIVE_SATURATION_Z: i16 = 32767;
+
 impl RawData {
     pub fn from_bytes(buf: &[u8; 8]) -> Self {
         // X: 13-bit signed (LSB[7:3] + MSB[7:0])
-        let x13 = (((buf[1] as u16) << 5) | ((buf[0] as u16) >> 3)) as i16;
-        let x = (x13 << 3) >> 3;  // 13-bit sign extend
+        let x_lsb = ((buf[0] & 0xF8) >> 3) as u16; // bit[7:3]
+        let x_msb = buf[1] as u16;
+        let x_raw = (x_msb << 5) | x_lsb;
+        let x = if (x_raw & 0x1000) != 0 {
+            (x_raw | 0xE000) as i16 // sign-extend 13->16
+        } else {
+            x_raw as i16
+        };
 
         // Y: 13-bit signed
-        let y13 = (((buf[3] as u16) << 5) | ((buf[2] as u16) >> 3)) as i16;
-        let y = (y13 << 3) >> 3;  // 13-bit sign extend
+        let y_lsb = ((buf[2] & 0xF8) >> 3) as u16;
+        let y_msb = buf[3] as u16;
+        let y_raw = (y_msb << 5) | y_lsb;
+        let y = if (y_raw & 0x1000) != 0 {
+            (y_raw | 0xE000) as i16
+        } else {
+            y_raw as i16
+        };
 
         // Z: 15-bit signed (LSB[7:1] + MSB[7:0])
-        let z15 = (((buf[5] as u16) << 7) | ((buf[4] as u16) >> 1)) as i16;
-        let z = (z15 << 1) >> 1;  // 15-bit sign extend
+        let z_lsb = ((buf[4] & 0xFE) >> 1) as u16; // bit[7:1]
+        let z_msb = buf[5] as u16;
+        let z_raw = (z_msb << 7) | z_lsb;
+        let z = if (z_raw & 0x4000) != 0 {
+            (z_raw | 0x8000) as i16 // sign-extend 15->16
+        } else {
+            z_raw as i16
+        };
 
         // RHALL: 14-bit unsigned (LSB[7:2] + MSB[7:0])
-        let rhall = ((buf[7] as u16) << 6) | ((buf[6] as u16) >> 2);
+        let rhall_lsb = ((buf[6] & 0xFC) >> 2) as u16; // bit[7:2]
+        let rhall_msb = buf[7] as u16;
+        let rhall = (rhall_msb << 6) | rhall_lsb;
 
         Self { x, y, z, rhall }
     }
@@ -200,70 +239,116 @@ impl TrimData {
             dig_z4: i16::from_le_bytes([dig_z4_lsb, dig_z4_msb]),
             dig_xy1,
             dig_xy2: dig_xy2 as i8,
-            dig_xyz1: u16::from_le_bytes([dig_xyz1_lsb, dig_xyz1_msb]),
+            dig_xyz1: u16::from_le_bytes([dig_xyz1_lsb, dig_xyz1_msb & 0x7F]),
         }
     }
 
     /// Apply compensation to raw data, returns [µT]
+    /// Based on official Bosch BMM150_USE_FLOATING_POINT implementation
     pub fn compensate(&self, raw: &RawData) -> Mag {
-        if raw.rhall == 0 {
-            return Mag::default();
-        }
-
-        let rhall = raw.rhall as f32;
-
         Mag {
-            x: self.compensate_x(raw.x, rhall),
-            y: self.compensate_y(raw.y, rhall),
-            z: self.compensate_z(raw.z, rhall),
+            x: self.compensate_x(raw.x, raw.rhall) as f32,
+            y: self.compensate_y(raw.y, raw.rhall) as f32,
+            z: self.compensate_z(raw.z, raw.rhall) as f32,
         }
     }
 
-    fn compensate_x(&self, raw: i16, rhall: f32) -> f32 {
-        if raw == -4096 {
-            return 0.0;
+    /// Compensate X-axis data
+    fn compensate_x(&self, mag_data_x: i16, data_rhall: u16) -> i16 {
+        // Overflow condition check
+        if mag_data_x == OVERFLOW_ADCVAL_XYAXES_FLIP {
+            return OVERFLOW_OUTPUT;
         }
 
-        let process_comp_x0 = self.dig_xyz1 as f32 * 16384.0 / rhall;
-        let process_comp_x1 = process_comp_x0 - 16384.0;
-        let process_comp_x2 =
-            self.dig_xy2 as f32 * (process_comp_x1 * process_comp_x1 / 268435456.0);
-        let process_comp_x3 = process_comp_x2 + process_comp_x1 * self.dig_xy1 as f32 / 16384.0;
-        let process_comp_x4 = self.dig_x2 as f32 + 160.0;
-        let process_comp_x5 = raw as f32 * ((process_comp_x3 + 256.0) * process_comp_x4);
+        let process_comp_x0 = if data_rhall != 0 {
+            data_rhall
+        }
+        else if self.dig_xyz1 != 0 {
+            self.dig_xyz1
+        }
+        else {
+            0
+        };
 
-        (process_comp_x5 / 8192.0 + self.dig_x1 as f32 * 8.0) / 16.0
+        if process_comp_x0 == 0 {
+            return OVERFLOW_OUTPUT;
+        }
+
+        // Processing compensation equations
+        let process_comp_x1 = self.dig_xyz1 as i32 * 16384 / process_comp_x0 as i32;
+        let process_comp_x2 = process_comp_x1 as u16 - 0x4000_u16;
+        let retval = process_comp_x2 as i16;
+        let process_comp_x3 = retval as i32 * retval as i32;
+        let process_comp_x4 = self.dig_xy2 as i32 * (process_comp_x3 / 128);
+        let process_comp_x5 = (self.dig_xy1 as i16 * 128) as i32;
+        let process_comp_x6 = retval as i32 * process_comp_x5;
+        let process_comp_x7 = (process_comp_x4 + process_comp_x6) / 512 + 0x100000_i32;
+        let process_comp_x8 = (self.dig_x2 as i16 + 0xA0_i16) as i32;
+        let process_comp_x9 = (process_comp_x7 * process_comp_x8) / 4096;
+        let process_comp_x10 = mag_data_x as i32 * process_comp_x9;
+        let retval = (process_comp_x10 / 8192) as i16;
+
+        (retval + (self.dig_x1 as i16 * 8)) / 16
     }
 
-    fn compensate_y(&self, raw: i16, rhall: f32) -> f32 {
-        if raw == -4096 {
-            return 0.0;
+    /// Compensate Y-axis data
+    fn compensate_y(&self, mag_data_y: i16, data_rhall: u16) -> i16 {
+        // Overflow condition check
+        if mag_data_y == OVERFLOW_ADCVAL_XYAXES_FLIP {
+            return OVERFLOW_OUTPUT;
         }
 
-        let process_comp_y0 = self.dig_xyz1 as f32 * 16384.0 / rhall;
-        let process_comp_y1 = process_comp_y0 - 16384.0;
-        let process_comp_y2 =
-            self.dig_xy2 as f32 * (process_comp_y1 * process_comp_y1 / 268435456.0);
-        let process_comp_y3 = process_comp_y2 + process_comp_y1 * self.dig_xy1 as f32 / 16384.0;
-        let process_comp_y4 = self.dig_y2 as f32 + 160.0;
-        let process_comp_y5 = raw as f32 * ((process_comp_y3 + 256.0) * process_comp_y4);
+        let process_comp_y0 = if data_rhall != 0 {
+            data_rhall
+        }
+        else if self.dig_xyz1 != 0 {
+            self.dig_xyz1
+        }
+        else {
+            0
+        };
 
-        (process_comp_y5 / 8192.0 + self.dig_y1 as f32 * 8.0) / 16.0
+        if process_comp_y0 == 0 {
+            return OVERFLOW_OUTPUT;
+        }
+
+        // Processing compensation equations
+        let process_comp_y1 = self.dig_xyz1 as i32 * 16384 / process_comp_y0 as i32;
+        let process_comp_y2 = process_comp_y1 as u16 - 0x4000_u16;
+        let retval = process_comp_y2 as i16;
+        let process_comp_y3 = retval as i32 * retval as i32;
+        let process_comp_y4 = self.dig_xy2 as i32 * (process_comp_y3 / 128);
+        let process_comp_y5 = (self.dig_xy1 as i16 * 128) as i32;
+        let process_comp_y6 = retval as i32 * process_comp_y5;
+        let process_comp_y7 = (process_comp_y4 + process_comp_y6) / 512 + 0x100000_i32;
+        let process_comp_y8 = (self.dig_y2 as i16 + 0xA0_i16) as i32;
+        let process_comp_y9 = (process_comp_y7 * process_comp_y8) / 4096;
+        let process_comp_y10 = mag_data_y as i32 * process_comp_y9;
+        let retval = (process_comp_y10 / 8192) as i16;
+
+        (retval + (self.dig_y1 as i16 * 8)) / 16
     }
 
-    fn compensate_z(&self, raw: i16, rhall: f32) -> f32 {
-        if raw == -16384 {
-            return 0.0;
+    /// Compensate Z-axis data
+    fn compensate_z(&self, mag_data_z: i16, data_rhall: u16) -> i16 {
+        // Overflow condition check
+        if mag_data_z == OVERFLOW_ADCVAL_ZAXIS_HALL {
+            return OVERFLOW_OUTPUT;
         }
 
-        let process_comp_z0 = raw as f32 - self.dig_z4 as f32;
-        let process_comp_z1 = rhall - self.dig_xyz1 as f32;
-        let process_comp_z2 = self.dig_z3 as f32 * process_comp_z1;
-        let process_comp_z3 = self.dig_z1 as f32 * rhall / 32768.0;
-        let process_comp_z4 = self.dig_z2 as f32 + process_comp_z3;
-        let process_comp_z5 = process_comp_z0 * 131072.0 - process_comp_z2;
+        if self.dig_z2 == 0 || self.dig_z1 == 0 || self.dig_xyz1 == 0 || data_rhall == 0 {
+            return OVERFLOW_OUTPUT;
+        }
 
-        process_comp_z5 / (process_comp_z4 * 4.0) / 16.0
+        // Processing compensation equations
+        let process_comp_z0 = data_rhall as i16 - self.dig_xyz1 as i16;
+        let process_comp_z1 = self.dig_z3 as i32 * process_comp_z0 as i32 / 4;
+        let process_comp_z2 = (mag_data_z - self.dig_z4) as i32 * 32768;
+        let process_comp_z3 = self.dig_z1 as i32 * data_rhall as i32 * 2;
+        let process_comp_z4 = ((process_comp_z3 + 32768) / 65536) as i16;
+        let retval = (process_comp_z2 - process_comp_z1) / (self.dig_z2 + process_comp_z4) as i32;
+
+        ((retval / 16) as i16).clamp(NEGATIVE_SATURATION_Z, POSITIVE_SATURATION_Z)
     }
 }
 
@@ -317,7 +402,15 @@ impl Bmm150Aux {
 
     /// Parse and compensate raw bytes to Mag [µT]
     pub fn parse_data(&self, buf: &[u8; 8]) -> Mag {
+        defmt::info!(
+            "buf: {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X}",
+            buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7]
+        );
         let raw = RawData::from_bytes(buf);
+        defmt::info!("Raw: x={}, y={}, z={}, rhall={}", raw.x, raw.y, raw.z, raw.rhall);
+        defmt::info!("Trim: x1:{}, y1:{}, x2:{}, y2:{}, z1:{}, z2:{}, z3:{}, z4:{}, xy1:{}, xy2:{}, xyz1:{}", 
+            self.trim.dig_x1, self.trim.dig_y1, self.trim.dig_x2, self.trim.dig_y2, self.trim.dig_z1, self.trim.dig_z2, 
+            self.trim.dig_z3, self.trim.dig_z4, self.trim.dig_xy1, self.trim.dig_xy2, self.trim.dig_xyz1);
         self.trim.compensate(&raw)
     }
 
