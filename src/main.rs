@@ -253,7 +253,7 @@ fn main() -> ! {
             mag_noise: 0.5,
             ..Default::default()
     });
-    ekf.set_mag_reference(-mag_ref[2], mag_ref[1], mag_ref[0]);
+    ekf.set_mag_reference(mag_ref[0], mag_ref[1], mag_ref[2]); // リファレンスはZ-upでとった
 
     let i2c1 = I2c::new(peripherals.I2C1, 
         I2cConfig::default()
@@ -333,14 +333,13 @@ fn main() -> ! {
                         let mag = mag_raw.apply_offset(mag_offset);
                         let (mx, my, mz) = (mag.x, mag.y, mag.z);
                         let state = ekf.update_x_up(ax, ay, az, gx, gy, gz);
-                        // if counter % 10 == 0 {
-                        //     let mag = mag_raw.apply_offset(mag_offset);
-                        //     ekf.update_mag_x_up(mag.x, mag.y, mag.z);
-                        // }
+                        if counter % 10 == 0 {
+                            ekf.update_mag_x_up(mag.x, mag.y, mag.z);
+                        }
                         if counter % 100 == 0 {
-                            info!("a={}, {}, {}", ax, ay, az);
-                            info!("g={}, {}, {}", gx, gy, gz);
-                            info!("m={}, {}, {}", mx, my, mz);
+                        //     info!("a={}, {}, {}", ax, ay, az);
+                        //     info!("g={}, {}, {}", gx, gy, gz);
+                        //     info!("m={}, {}, {}", mx, my, mz);
                             info!("r={}, {}, {}", state.roll, state.pitch, state.yaw);
                         }
                         counter += 1;
