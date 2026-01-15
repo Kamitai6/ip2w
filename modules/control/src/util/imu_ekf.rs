@@ -1,14 +1,12 @@
 //! Quaternion Extended Kalman Filter for IMU Attitude Estimation
 //!
-//! nalgebra版 - バイアス相関によるyawドリフト軽減
+//! nalgebra版 - 加速度計 + 磁力計による9軸センサーフュージョン
 
 #![no_std]
 
 use core::f32::{consts::PI, EPSILON};
-use nalgebra::{
-    Matrix3, Quaternion, SMatrix, SVector, UnitQuaternion, Vector3,
-};
 use libm::{atan2f, sqrtf};
+use nalgebra::{Matrix3, Quaternion, SMatrix, SVector, UnitQuaternion, Vector3};
 
 const DEG_TO_RAD: f32 = PI / 180.0;
 const RAD_TO_DEG: f32 = 180.0 / PI;
@@ -16,8 +14,8 @@ const RAD_TO_DEG: f32 = 180.0 / PI;
 // 状態ベクトル: [q0, q1, q2, q3, bias_x, bias_y, bias_z]
 type StateVector = SVector<f32, 7>;
 type CovMatrix = SMatrix<f32, 7, 7>;
-type ObsMatrix = SMatrix<f32, 3, 7>;
-type KalmanGain = SMatrix<f32, 7, 3>;
+type ObsMatrix3x7 = SMatrix<f32, 3, 7>;
+type KalmanGain3 = SMatrix<f32, 7, 3>;
 
 /// Continuous angle tracker (unwrapped)
 #[derive(Debug, Clone, Copy)]
@@ -28,7 +26,10 @@ struct ContinuousAngle {
 
 impl Default for ContinuousAngle {
     fn default() -> Self {
-        Self { turns: 0.0, prev: 0.0 }
+        Self {
+            turns: 0.0,
+            prev: 0.0,
+        }
     }
 }
 
@@ -61,6 +62,7 @@ pub struct EkfConfig {
     pub gyro_noise: f32,
     pub gyro_bias_noise: f32,
     pub accel_noise: f32,
+    pub mag_noise: f32,
     pub initial_quat_variance: f32,
     pub initial_bias_variance: f32,
     pub accel_magnitude_min: f32,
@@ -76,6 +78,7 @@ impl Default for EkfConfig {
             gyro_noise: 0.01,
             gyro_bias_noise: 0.0001,
             accel_noise: 0.1,
+            mag_noise: 0.5,
             initial_quat_variance: 0.1,
             initial_bias_variance: 0.01,
             accel_magnitude_min: 0.8,
@@ -136,8 +139,12 @@ pub struct ImuEkf {
     p: CovMatrix,
     /// プロセスノイズ行列（事前計算）
     q_mat: CovMatrix,
-    /// 観測ノイズ
+    /// 加速度計観測ノイズ
     r_accel: f32,
+    /// 磁力計観測ノイズ
+    r_mag: f32,
+    /// 基準磁場ベクトル（NED座標系）
+    mag_ref: Option<Vector3<f32>>,
     config: EkfConfig,
     last_gyro: [f32; 3],
     initialized: bool,
@@ -150,6 +157,7 @@ impl ImuEkf {
         let q_gyro = config.gyro_noise * config.gyro_noise * dt;
         let q_bias = config.gyro_bias_noise * config.gyro_bias_noise * dt;
         let r_accel = config.accel_noise * config.accel_noise;
+        let r_mag = config.mag_noise * config.mag_noise;
 
         let pq = config.initial_quat_variance;
         let pb = config.initial_bias_variance;
@@ -164,8 +172,7 @@ impl ImuEkf {
 
         // プロセスノイズ行列（事前計算）
         let q_mat = CovMatrix::from_diagonal(&SVector::<f32, 7>::from_row_slice(&[
-            q_gyro, q_gyro, q_gyro, q_gyro,
-            q_bias, q_bias, q_bias,
+            q_gyro, q_gyro, q_gyro, q_gyro, q_bias, q_bias, q_bias,
         ]));
 
         Self {
@@ -173,6 +180,8 @@ impl ImuEkf {
             p,
             q_mat,
             r_accel,
+            r_mag,
+            mag_ref: None,
             config,
             last_gyro: [0.0; 3],
             initialized: false,
@@ -180,7 +189,36 @@ impl ImuEkf {
         }
     }
 
-    pub fn update(&mut self, ax: f32, ay: f32, az: f32, gx: f32, gy: f32, gz: f32) -> AttitudeState {
+    /// 基準磁場ベクトルを設定（ハードアイアン補正済みの値）
+    ///
+    /// デバイスが水平の状態で、補正済み磁力計データを渡す。
+    /// 内部でノルム正規化される。
+    pub fn set_mag_reference(&mut self, mx: f32, my: f32, mz: f32) {
+        let norm = sqrtf(mx * mx + my * my + mz * mz);
+        if norm > EPSILON {
+            self.mag_ref = Some(Vector3::new(mx / norm, my / norm, mz / norm));
+        }
+    }
+
+    /// 基準磁場ベクトルをクリア
+    pub fn clear_mag_reference(&mut self) {
+        self.mag_ref = None;
+    }
+
+    /// 基準磁場が設定されているか
+    pub fn has_mag_reference(&self) -> bool {
+        self.mag_ref.is_some()
+    }
+
+    pub fn update(
+        &mut self,
+        ax: f32,
+        ay: f32,
+        az: f32,
+        gx: f32,
+        gy: f32,
+        gz: f32,
+    ) -> AttitudeState {
         self.last_gyro = [gx, gy, gz];
 
         let wx = gx - self.x[4];
@@ -188,8 +226,10 @@ impl ImuEkf {
         let wz = gz - self.x[6];
 
         let accel_norm_sq = ax * ax + ay * ay + az * az;
-        let accel_valid = accel_norm_sq >= self.config.accel_magnitude_min * self.config.accel_magnitude_min
-            && accel_norm_sq <= self.config.accel_magnitude_max * self.config.accel_magnitude_max;
+        let accel_valid = accel_norm_sq
+            >= self.config.accel_magnitude_min * self.config.accel_magnitude_min
+            && accel_norm_sq
+                <= self.config.accel_magnitude_max * self.config.accel_magnitude_max;
 
         if !self.initialized && accel_valid {
             self.init_from_accel(ax, ay, az);
@@ -199,7 +239,7 @@ impl ImuEkf {
         // ===== PREDICTION STEP =====
         self.predict(wx, wy, wz);
 
-        // ===== UPDATE STEP =====
+        // ===== UPDATE STEP (Accelerometer) =====
         if accel_valid && accel_norm_sq > EPSILON {
             let norm_inv = 1.0 / sqrtf(accel_norm_sq);
             let bias_before = [self.x[4], self.x[5], self.x[6]];
@@ -217,6 +257,135 @@ impl ImuEkf {
         self.ensure_positive_definite();
 
         self.build_current_state(accel_valid)
+    }
+
+    /// 磁力計による更新（2段階目）
+    ///
+    /// ハードアイアン補正済みの磁力計データを渡す。
+    /// set_mag_reference()で基準磁場を設定していない場合は何もしない。
+    pub fn update_mag(&mut self, mx: f32, my: f32, mz: f32) {
+        let mag_ref = match self.mag_ref {
+            Some(ref m) => *m,
+            None => return,
+        };
+
+        // 観測値を正規化
+        let mag_norm = sqrtf(mx * mx + my * my + mz * mz);
+        if mag_norm < EPSILON {
+            return;
+        }
+        let mx = mx / mag_norm;
+        let my = my / mag_norm;
+        let mz = mz / mag_norm;
+
+        let q0 = self.x[0];
+        let q1 = self.x[1];
+        let q2 = self.x[2];
+        let q3 = self.x[3];
+
+        // 回転行列 R(q) のボディからワールドへの変換
+        // 予測観測 h = R(q)^T * m_ref （ワールドからボディへ）
+        let q = UnitQuaternion::from_quaternion(Quaternion::new(q0, q1, q2, q3));
+        let h_vec = q.inverse_transform_vector(&mag_ref);
+
+        // イノベーション
+        let y = Vector3::new(mx - h_vec.x, my - h_vec.y, mz - h_vec.z);
+
+        // 観測ヤコビアン H (3x7)
+        // h = R(q)^T * m_ref の q に対する偏微分
+        let h = self.compute_mag_jacobian(&mag_ref);
+
+        // 観測ノイズ R
+        let r = Matrix3::from_diagonal(&Vector3::new(self.r_mag, self.r_mag, self.r_mag));
+
+        // イノベーション共分散 S = H * P * H^T + R
+        let s = h * self.p * h.transpose() + r;
+
+        // カルマンゲイン K = P * H^T * S^-1
+        let s_inv = s
+            .try_inverse()
+            .unwrap_or_else(|| Matrix3::identity() * EPSILON);
+        let k: KalmanGain3 = self.p * h.transpose() * s_inv;
+
+        // 状態更新
+        let dx = k * y;
+        self.x += dx;
+
+        // Joseph形式の共分散更新
+        let i_kh = CovMatrix::identity() - k * h;
+        self.p = i_kh * self.p * i_kh.transpose() + k * r * k.transpose();
+
+        self.normalize_quaternion();
+        self.ensure_positive_definite();
+    }
+
+    /// 磁力計観測のヤコビアン計算
+    ///
+    /// h = R(q)^T * m_ref の q に対する偏微分
+    fn compute_mag_jacobian(&self, m_ref: &Vector3<f32>) -> ObsMatrix3x7 {
+        let q0 = self.x[0];
+        let q1 = self.x[1];
+        let q2 = self.x[2];
+        let q3 = self.x[3];
+
+        let mx = m_ref.x;
+        let my = m_ref.y;
+        let mz = m_ref.z;
+
+        // R(q)^T の各成分:
+        // R^T[0,0] = 1 - 2(q2² + q3²)
+        // R^T[0,1] = 2(q1q2 - q0q3)
+        // R^T[0,2] = 2(q1q3 + q0q2)
+        // R^T[1,0] = 2(q1q2 + q0q3)
+        // R^T[1,1] = 1 - 2(q1² + q3²)
+        // R^T[1,2] = 2(q2q3 - q0q1)
+        // R^T[2,0] = 2(q1q3 - q0q2)
+        // R^T[2,1] = 2(q2q3 + q0q1)
+        // R^T[2,2] = 1 - 2(q1² + q2²)
+
+        // h = R^T * m なので:
+        // hx = (1-2q2²-2q3²)mx + 2(q1q2-q0q3)my + 2(q1q3+q0q2)mz
+        // hy = 2(q1q2+q0q3)mx + (1-2q1²-2q3²)my + 2(q2q3-q0q1)mz
+        // hz = 2(q1q3-q0q2)mx + 2(q2q3+q0q1)my + (1-2q1²-2q2²)mz
+
+        // ∂hx/∂q0 = -2q3*my + 2q2*mz
+        // ∂hx/∂q1 = 2q2*my + 2q3*mz
+        // ∂hx/∂q2 = -4q2*mx + 2q1*my + 2q0*mz
+        // ∂hx/∂q3 = -4q3*mx - 2q0*my + 2q1*mz
+
+        // ∂hy/∂q0 = 2q3*mx - 2q1*mz
+        // ∂hy/∂q1 = 2q2*mx - 4q1*my - 2q0*mz
+        // ∂hy/∂q2 = 2q1*mx + 2q3*mz
+        // ∂hy/∂q3 = 2q0*mx - 4q3*my + 2q2*mz
+
+        // ∂hz/∂q0 = -2q2*mx + 2q1*my
+        // ∂hz/∂q1 = 2q3*mx + 2q0*my - 4q1*mz
+        // ∂hz/∂q2 = -2q0*mx + 2q3*my - 4q2*mz
+        // ∂hz/∂q3 = 2q1*mx + 2q2*my
+
+        let mut h = ObsMatrix3x7::zeros();
+
+        // ∂hx/∂q
+        h[(0, 0)] = -2.0 * q3 * my + 2.0 * q2 * mz;
+        h[(0, 1)] = 2.0 * q2 * my + 2.0 * q3 * mz;
+        h[(0, 2)] = -4.0 * q2 * mx + 2.0 * q1 * my + 2.0 * q0 * mz;
+        h[(0, 3)] = -4.0 * q3 * mx - 2.0 * q0 * my + 2.0 * q1 * mz;
+
+        // ∂hy/∂q
+        h[(1, 0)] = 2.0 * q3 * mx - 2.0 * q1 * mz;
+        h[(1, 1)] = 2.0 * q2 * mx - 4.0 * q1 * my - 2.0 * q0 * mz;
+        h[(1, 2)] = 2.0 * q1 * mx + 2.0 * q3 * mz;
+        h[(1, 3)] = 2.0 * q0 * mx - 4.0 * q3 * my + 2.0 * q2 * mz;
+
+        // ∂hz/∂q
+        h[(2, 0)] = -2.0 * q2 * mx + 2.0 * q1 * my;
+        h[(2, 1)] = 2.0 * q3 * mx + 2.0 * q0 * my - 4.0 * q1 * mz;
+        h[(2, 2)] = -2.0 * q0 * mx + 2.0 * q3 * my - 4.0 * q2 * mz;
+        h[(2, 3)] = 2.0 * q1 * mx + 2.0 * q2 * my;
+
+        // バイアスに対する偏微分は0（列4,5,6は0のまま）
+
+        h
     }
 
     fn predict(&mut self, wx: f32, wy: f32, wz: f32) {
@@ -292,7 +461,7 @@ impl ImuEkf {
         let y = Vector3::new(ax - hx, ay - hy, az - hz);
 
         // 観測ヤコビアン H (3x7)
-        let mut h = ObsMatrix::zeros();
+        let mut h = ObsMatrix3x7::zeros();
         h[(0, 0)] = -2.0 * q2;
         h[(0, 1)] = 2.0 * q3;
         h[(0, 2)] = -2.0 * q0;
@@ -307,18 +476,16 @@ impl ImuEkf {
         h[(2, 3)] = 2.0 * q3;
 
         // 観測ノイズ R
-        let r = Matrix3::from_diagonal(&Vector3::new(
-            self.r_accel,
-            self.r_accel,
-            self.r_accel,
-        ));
+        let r = Matrix3::from_diagonal(&Vector3::new(self.r_accel, self.r_accel, self.r_accel));
 
         // イノベーション共分散 S = H * P * H^T + R
         let s = h * self.p * h.transpose() + r;
 
         // カルマンゲイン K = P * H^T * S^-1
-        let s_inv = s.try_inverse().unwrap_or_else(|| Matrix3::identity() * EPSILON);
-        let k: KalmanGain = self.p * h.transpose() * s_inv;
+        let s_inv = s
+            .try_inverse()
+            .unwrap_or_else(|| Matrix3::identity() * EPSILON);
+        let k: KalmanGain3 = self.p * h.transpose() * s_inv;
 
         // 状態更新
         let dx = k * y;
@@ -418,10 +585,19 @@ impl ImuEkf {
 
     pub fn update_x_up(
         &mut self,
-        ax: f32, ay: f32, az: f32,
-        gx: f32, gy: f32, gz: f32,
+        ax: f32,
+        ay: f32,
+        az: f32,
+        gx: f32,
+        gy: f32,
+        gz: f32,
     ) -> AttitudeState {
         self.update(-az, ay, ax, -gz, gy, gx)
+    }
+
+    /// X軸が上向きの座標系で磁力計更新
+    pub fn update_mag_x_up(&mut self, mx: f32, my: f32, mz: f32) {
+        self.update_mag(-mz, my, mx)
     }
 
     #[inline(always)]
@@ -450,6 +626,7 @@ impl ImuEkf {
     pub fn reset(&mut self) {
         self.x = StateVector::from_row_slice(&[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
         self.initialized = false;
+        self.mag_ref = None;
 
         let pq = self.config.initial_quat_variance;
         let pb = self.config.initial_bias_variance;
@@ -458,6 +635,11 @@ impl ImuEkf {
         ]));
 
         self.reset_continuous();
+    }
+
+    #[inline(always)]
+    pub fn is_initialized(&self) -> bool {
+        self.initialized
     }
 }
 

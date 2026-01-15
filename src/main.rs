@@ -145,12 +145,11 @@ fn main() -> ! {
 
     // Initialize IMU
     let mut imu = bmi270::Bmi270::new(I2cRefCellDevice::new(&i2c0_ref_cell))
-        // .with_mag(
-        //     bmm150::OpMode::Normal,
-        //     bmm150::DataRate::Hz30,
-        //     bmm150::Preset::Regular,
-        // )
-        ;
+        .with_mag(
+            bmm150::OpMode::Normal,
+            bmm150::DataRate::Hz30,
+            bmm150::Preset::Regular,
+        );
     imu.init_with_config(
         bmi270::Config {
             acc_odr: bmi270::AccOdr::Hz800,
@@ -251,10 +250,10 @@ fn main() -> ! {
             accel_noise: 0.15,
             accel_magnitude_min: 0.5,
             accel_magnitude_max: 1.5,
-            // mag_noise: 0.5,
+            mag_noise: 0.5,
             ..Default::default()
     });
-    // ekf.set_mag_reference(-mag_ref[2], mag_ref[1], mag_ref[0]);
+    ekf.set_mag_reference(-mag_ref[2], mag_ref[1], mag_ref[0]);
 
     let i2c1 = I2c::new(peripherals.I2C1, 
         I2cConfig::default()
@@ -292,7 +291,7 @@ fn main() -> ! {
         .with_max(45.0, 5.0)
         .with_lowpass(5.0);
 
-    let mut yaw_pid = pid::PID::new(DT, 0.0, 0.0, 20.0);
+    let mut yaw_pid = pid::PID::new(DT, 1.0, 0.0, 20.0);
     
     // esp_rtos::start(timg0.timer0);
     // let radio_init = esp_radio::init().expect("Failed to initialize Wi-Fi/BLE controller");
@@ -329,18 +328,20 @@ fn main() -> ! {
 
                         let d = imu.read_immu().unwrap();
                         let (ax, ay, az) = (d.accel.x, d.accel.y, d.accel.z);
-                        let (gx, gy, gz) = (d.gyro.x, d.gyro.y, d.gyro.z);
-                        // let mag_raw = d.mag.unwrap();
-                        // let mag = mag_raw.apply_offset(mag_offset);
-                        // let (mx, my, mz) = (mag.x, mag.y, mag.z);
+                        let (gx, gy, gz) = imu_ekf::degree_to_rad((d.gyro.x, d.gyro.y, d.gyro.z));
+                        let mag_raw = d.mag.unwrap();
+                        let mag = mag_raw.apply_offset(mag_offset);
+                        let (mx, my, mz) = (mag.x, mag.y, mag.z);
                         let state = ekf.update_x_up(ax, ay, az, gx, gy, gz);
                         // if counter % 10 == 0 {
                         //     let mag = mag_raw.apply_offset(mag_offset);
                         //     ekf.update_mag_x_up(mag.x, mag.y, mag.z);
                         // }
                         if counter % 100 == 0 {
-                            // info!("{}, {}, {}", ax, ay, az);
-                            // info!("{}, {}, {}", mx, my, mz);
+                            info!("a={}, {}, {}", ax, ay, az);
+                            info!("g={}, {}, {}", gx, gy, gz);
+                            info!("m={}, {}, {}", mx, my, mz);
+                            info!("r={}, {}, {}", state.roll, state.pitch, state.yaw);
                         }
                         counter += 1;
 
