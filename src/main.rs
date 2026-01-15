@@ -36,7 +36,7 @@ use embedded_graphics::{
     primitives::{Circle, PrimitiveStyle},
 };
 use embedded_hal_bus::i2c::{RefCellDevice as I2cRefCellDevice};
-use atom::{atom_motion, bmi270, bmm150, lp5562};
+use atom::{atom_motion, ina226, bmi270, bmm150, lp5562};
 use control::{fb::{pid, smc}, ff::{gravity, pos_regulator}, util::{imu_ekf, deadzone}};
 use mipidsi_async::{
     Builder, 
@@ -99,56 +99,6 @@ fn main() -> ! {
     lp5562.set_current(lp5562::Channel::White, 255).unwrap();
     lp5562.set_pwm(lp5562::Channel::White, 255).unwrap(); // 白色点灯
 
-    // Initialize IMU
-    let mut imu = bmi270::Bmi270::new(I2cRefCellDevice::new(&i2c0_ref_cell))
-        .with_mag(
-            bmm150::OpMode::Normal,
-            bmm150::DataRate::Hz30,
-            bmm150::Preset::Regular,
-        );
-    imu.init_with_config(
-        bmi270::Config {
-            acc_odr: bmi270::AccOdr::Hz800,
-            gyr_odr: bmi270::GyrOdr::Hz800,
-            acc_range: bmi270::AccRange::G4,
-            gyr_range: bmi270::GyrRange::Dps500,
-            acc_bwp: bmi270::AccBwp::Normal,
-            gyr_bwp: bmi270::GyrBwp::Normal,
-            perf_mode: bmi270::PerfMode::PerfOpt,
-            aux_odr: bmi270::AuxOdr::Hz50, //30Hzなので、これ以上上げると死ぬ
-        }, 
-        &mut |us| delay.delay_micros(us)
-    ).unwrap();
-
-    /* calibration */
-    // imu.calibrate_acc(bmi270::FocAccConfig::z_up(), |us| delay.delay_micros(us)).unwrap();
-    // let (ax, ay, az) = imu.read_acc_offset();
-    // info!("AccelOffset: x={}, y={}, z={}", ax, ay, az);
-    imu.write_acc_offset((33, -123, -144));
-    /* always calibration */
-    imu.calibrate_gyro(|us| delay.delay_micros(us)).unwrap();
-
-    let mut ekf = imu_ekf::ImuEkf::new(
-        imu_ekf::EkfConfig {
-            dt: DT,
-            gyro_noise: 0.05,
-            gyro_bias_noise: 0.0005,
-            accel_noise: 0.15,
-            accel_magnitude_min: 0.5,
-            accel_magnitude_max: 1.5,
-            ..Default::default()
-    });
-
-    let i2c1 = I2c::new(peripherals.I2C1, 
-        I2cConfig::default()
-            .with_frequency(Rate::from_khz(800))
-        ).unwrap()
-            .with_sda(peripherals.GPIO38)
-            .with_scl(peripherals.GPIO39);
-    let i2c1_ref_cell = RefCell::new(i2c1);
-
-    let mut motion = atom_motion::AtomMotion::new(I2cRefCellDevice::new(&i2c1_ref_cell));
-
     let lcd_spi = Spi::new(
             peripherals.SPI2,
             SpiConfig::default()
@@ -193,6 +143,140 @@ fn main() -> ! {
             .unwrap()
     };
 
+    // Initialize IMU
+    let mut imu = bmi270::Bmi270::new(I2cRefCellDevice::new(&i2c0_ref_cell))
+        // .with_mag(
+        //     bmm150::OpMode::Normal,
+        //     bmm150::DataRate::Hz30,
+        //     bmm150::Preset::Regular,
+        // )
+        ;
+    imu.init_with_config(
+        bmi270::Config {
+            acc_odr: bmi270::AccOdr::Hz800,
+            gyr_odr: bmi270::GyrOdr::Hz800,
+            acc_range: bmi270::AccRange::G4,
+            gyr_range: bmi270::GyrRange::Dps500,
+            acc_bwp: bmi270::AccBwp::Normal,
+            gyr_bwp: bmi270::GyrBwp::Normal,
+            perf_mode: bmi270::PerfMode::PerfOpt,
+            aux_odr: bmi270::AuxOdr::Hz50, //30Hzなので、これ以上上げると死ぬ
+        }, 
+        &mut |us| delay.delay_micros(us)
+    ).unwrap();
+
+    /* calibration */
+    // imu.calibrate_acc(bmi270::FocAccConfig::z_up(), |us| delay.delay_micros(us)).unwrap();
+    // let (ax, ay, az) = imu.read_acc_offset();
+    // info!("AccelOffset: x={}, y={}, z={}", ax, ay, az);
+    imu.write_acc_offset((33, -123, -144));
+    /* always calibration */
+    imu.calibrate_gyro(|us| delay.delay_micros(us)).unwrap();
+    let mut mag_calibrator = bmm150::MagCalibrator::new();
+
+    use alloc::format;
+    // // キャリブレーションループ内
+    // loop {
+    //     let mag = imu.read_mag().unwrap().unwrap();
+    //     match mag_calibrator.update(&mag) {
+    //         bmm150::UpdateResult::Added | bmm150::UpdateResult::Skipped => {
+    //             let min = mag_calibrator.min();
+    //             let max = mag_calibrator.max();
+    //             let count = mag_calibrator.sample_count();
+    //             display.clear(Rgb565::BLACK).unwrap();
+    //             let style = MonoTextStyleBuilder::new()
+    //                 .font(&FONT_10X20)
+    //                 .text_color(Rgb565::WHITE)
+    //                 .build();
+    //             Text::with_alignment("MAG CAL", Point::new(64, 15), style, Alignment::Center)
+    //                 .draw(&mut display).unwrap();
+    //             let text = format!("N: {}", count);
+    //             Text::new(&text, Point::new(5, 40), style).draw(&mut display).unwrap();
+    //             let text = format!("X:{:.0}~{:.0}", min[0], max[0]);
+    //             Text::new(&text, Point::new(5, 65), style).draw(&mut display).unwrap();
+    //             let text = format!("Y:{:.0}~{:.0}", min[1], max[1]);
+    //             Text::new(&text, Point::new(5, 90), style).draw(&mut display).unwrap();
+    //             let text = format!("Z:{:.0}~{:.0}", min[2], max[2]);
+    //             Text::new(&text, Point::new(5, 115), style).draw(&mut display).unwrap();
+    //             display.flush().unwrap();
+    //         }
+    //         bmm150::UpdateResult::Full => break,
+    //     }
+    //     if button.is_low() { break; }
+    // }
+
+    // // 終了後：オフセット表示（3行に分ける）
+    // let offset = mag_calibrator.hard_iron_offset();
+    // display.clear(Rgb565::BLACK).unwrap();
+    // let style = MonoTextStyleBuilder::new()
+    //     .font(&FONT_10X20)
+    //     .text_color(Rgb565::GREEN)
+    //     .build();
+    // Text::with_alignment("DONE", Point::new(64, 20), style, Alignment::Center)
+    //     .draw(&mut display).unwrap();
+    // let text = format!("X: {:.1}", offset[0]);
+    // Text::new(&text, Point::new(5, 50), style).draw(&mut display).unwrap();
+    // let text = format!("Y: {:.1}", offset[1]);
+    // Text::new(&text, Point::new(5, 75), style).draw(&mut display).unwrap();
+    // let text = format!("Z: {:.1}", offset[2]);
+    // Text::new(&text, Point::new(5, 100), style).draw(&mut display).unwrap();
+    // display.flush().unwrap();
+    let mag_offset = [48.1, -1053.6, -751.6];
+
+    // while button.is_high() {}
+    // delay.delay_millis(1000);
+    // // 水平状態で基準磁場を設定
+    // let mag = imu.read_mag().unwrap().unwrap().apply_offset(mag_offset);
+    // display.clear(Rgb565::BLACK).unwrap();
+    // let style = MonoTextStyleBuilder::new()
+    //     .font(&FONT_10X20)
+    //     .text_color(Rgb565::GREEN)
+    //     .build();
+    // Text::with_alignment("DONE", Point::new(64, 20), style, Alignment::Center)
+    //     .draw(&mut display).unwrap();
+    // let text = format!("X: {:.1}", mag.x);
+    // Text::new(&text, Point::new(5, 50), style).draw(&mut display).unwrap();
+    // let text = format!("Y: {:.1}", mag.y);
+    // Text::new(&text, Point::new(5, 75), style).draw(&mut display).unwrap();
+    // let text = format!("Z: {:.1}", mag.z);
+    // Text::new(&text, Point::new(5, 100), style).draw(&mut display).unwrap();
+    // display.flush().unwrap();
+    let mag_ref = [7.1, 11.4, -6.1];
+
+    let mut ekf = imu_ekf::ImuEkf::new(
+        imu_ekf::EkfConfig {
+            dt: DT,
+            gyro_noise: 0.05,
+            gyro_bias_noise: 0.0005,
+            accel_noise: 0.15,
+            accel_magnitude_min: 0.5,
+            accel_magnitude_max: 1.5,
+            // mag_noise: 0.5,
+            ..Default::default()
+    });
+    // ekf.set_mag_reference(-mag_ref[2], mag_ref[1], mag_ref[0]);
+
+    let i2c1 = I2c::new(peripherals.I2C1, 
+        I2cConfig::default()
+            .with_frequency(Rate::from_khz(400))
+        ).unwrap()
+            .with_sda(peripherals.GPIO38)
+            .with_scl(peripherals.GPIO39);
+    let i2c1_ref_cell = RefCell::new(i2c1);
+
+    let mut motion = atom_motion::AtomMotion::new(I2cRefCellDevice::new(&i2c1_ref_cell));
+    let mut ina226 = ina226::Ina226::new(I2cRefCellDevice::new(&i2c1_ref_cell));
+    ina226.configure(
+        ina226::Averages::Avg16,
+        ina226::ConversionTime::Time1100us,
+        ina226::ConversionTime::Time1100us,
+        ina226::Mode::ShuntBusContinuous,
+    ).unwrap();
+    ina226.calibrate(0.02, 8.192).unwrap();
+    let v = ina226.bus_voltage().unwrap();
+    let i = ina226.current().unwrap();
+    info!("v:{}, i:{}", v, i);
+
     let mut face = face::Face::new(Point::new(64, 64), 50, 30);
 
     // ラムダ(P)上げ過ぎると発散する
@@ -208,7 +292,7 @@ fn main() -> ! {
         .with_max(45.0, 5.0)
         .with_lowpass(5.0);
 
-    let mut yaw_pid = pid::PID::new(DT, 1.0, 0.0, 20.0);
+    let mut yaw_pid = pid::PID::new(DT, 0.0, 0.0, 20.0);
     
     // esp_rtos::start(timg0.timer0);
     // let radio_init = esp_radio::init().expect("Failed to initialize Wi-Fi/BLE controller");
@@ -232,6 +316,7 @@ fn main() -> ! {
     let mut m1_pwm = 0;
     let mut m2_pwm = 0;
     let mut target_angle = 0.0;
+    let mut counter = 0;
 
     info!("Start!");
     loop {
@@ -240,23 +325,33 @@ fn main() -> ! {
             while let Some(event) = events::get_event() {
                 match event {
                     events::Event::MotionUpdate => {
+                        let start = Instant::now();
+
                         let d = imu.read_immu().unwrap();
                         let (ax, ay, az) = (d.accel.x, d.accel.y, d.accel.z);
                         let (gx, gy, gz) = (d.gyro.x, d.gyro.y, d.gyro.z);
-                        let mag = d.mag.unwrap();
-                        let (mx, my, mz) = (mag.x, mag.y, mag.z);
-                        // info!("{}, {}, {}", ax, ay, az);
-                        info!("{}, {}, {}", mx, my, mz);
+                        // let mag_raw = d.mag.unwrap();
+                        // let mag = mag_raw.apply_offset(mag_offset);
+                        // let (mx, my, mz) = (mag.x, mag.y, mag.z);
                         let state = ekf.update_x_up(ax, ay, az, gx, gy, gz);
+                        // if counter % 10 == 0 {
+                        //     let mag = mag_raw.apply_offset(mag_offset);
+                        //     ekf.update_mag_x_up(mag.x, mag.y, mag.z);
+                        // }
+                        if counter % 100 == 0 {
+                            // info!("{}, {}, {}", ax, ay, az);
+                            // info!("{}, {}, {}", mx, my, mz);
+                        }
+                        counter += 1;
 
                         if button.is_low() && !button_state  {
                             drive = !drive;
                         }
                         button_state = button.is_low();
 
-                        if state.roll.abs() > 1.0 || state.pitch.abs() > 1.0 {
-                            drive = false;
-                        }
+                        // if state.roll.abs() > 1.0 || state.pitch.abs() > 1.0 {
+                        //     drive = false;
+                        // }
 
                         if drive {
                             let now_angle = state.pitch - 0.125;
@@ -298,15 +393,20 @@ fn main() -> ! {
                             };
                             face.set_emotion(emotion);
                         }
+                        
+                        let elapsed = start.elapsed();
+                        if counter % 100 == 0 {
+                            // info!("loop {} elapsed: {}us", counter, elapsed.as_micros());
+                        }
                     }
                     events::Event::DisplayUpdate => {
-                        // if display.is_idle() {
-                        //     display.clear(Rgb565::BLACK).unwrap();
+                        if display.is_idle() {
+                            display.clear(Rgb565::BLACK).unwrap();
 
-                        //     face.update(&mut display, DT * 10.0).unwrap();
+                            face.update(&mut display, DT * 10.0).unwrap();
 
-                        //     display.flush_async().unwrap();
-                        // }
+                            display.flush_async().unwrap();
+                        }
                     }
                 }
             }

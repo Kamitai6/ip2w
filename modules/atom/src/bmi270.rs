@@ -731,25 +731,43 @@ impl<I2C: I2c> Bmi270<I2C> {
     }
 
     /// Read accelerometer data [g]
-    pub fn read_accel(&mut self) -> Result<(f32, f32, f32), I2C::Error> {
+    pub fn read_accel(&mut self) -> Result<Accel, I2C::Error> {
         let raw = self.read_accel_raw()?;
         let sens = self.acc_range.sensitivity();
-        Ok((
-            raw.x as f32 / sens,
-            raw.y as f32 / sens,
-            raw.z as f32 / sens,
-        ))
+        Ok(
+            Accel {
+                x: raw.x as f32 / sens,
+                y: raw.y as f32 / sens,
+                z: raw.z as f32 / sens,
+            }
+        )
     }
 
     /// Read gyroscope data [°/s]
-    pub fn read_gyro(&mut self) -> Result<(f32, f32, f32), I2C::Error> {
+    pub fn read_gyro(&mut self) -> Result<Gyro, I2C::Error> {
         let raw = self.read_gyro_raw()?;
         let sens = self.gyr_range.sensitivity();
-        Ok((
-            raw.x as f32 / sens,
-            raw.y as f32 / sens,
-            raw.z as f32 / sens,
-        ))
+        Ok(
+            Gyro {
+                x: raw.x as f32 / sens,
+                y: raw.y as f32 / sens,
+                z: raw.z as f32 / sens,
+            }
+        )
+    }
+
+    /// Read magnetometer data [µT] (returns None if mag not enabled)
+    pub fn read_mag(&mut self) -> Result<Option<Mag>, I2C::Error> {
+        if self.mag.is_none() {
+            return Ok(None);
+        }
+
+        let mut buf = [0u8; 8];
+        self.read_regs(reg::AUX_X_LSB, &mut buf)?;
+
+        let mag = self.mag.as_ref().unwrap();
+        let m = mag.parse_data(&buf);
+        Ok(Some(Mag{x: m.x, y: m.y, z: m.z}))
     }
 
     /// Read temperature [°C]

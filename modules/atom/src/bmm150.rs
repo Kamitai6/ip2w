@@ -3,6 +3,8 @@
 //! Standalone BMM150 definitions and compensation algorithms.
 //! Can be used with BMI270's AUX interface or directly via I2C.
 
+use heapless::Vec;
+
 /// BMM150 I2C addresses
 pub const ADDR_CSB_LOW: u8 = 0x10;
 pub const ADDR_CSB_HIGH: u8 = 0x13;
@@ -64,11 +66,7 @@ const OVERFLOW_ADCVAL_XYAXES_FLIP: i16 = -4096;
 /// Overflow ADC value for Z axis (hall overflow)
 const OVERFLOW_ADCVAL_ZAXIS_HALL: i16 = -16384;
 /// Overflow output value
-const OVERFLOW_OUTPUT: i16 = -32768;
 const OVERFLOW_OUTPUT_FLOAT: f32 = 0.0;
-
-const NEGATIVE_SATURATION_Z: i16 = -32767;
-const POSITIVE_SATURATION_Z: i16 = 32767;
 
 /// Operation mode
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -134,19 +132,20 @@ pub struct RawData {
     /// Hall resistance [14-bit unsigned]
     pub rhall: u16,
 }
+
 impl RawData {
     pub fn from_bytes(buf: &[u8; 8]) -> Self {
         // X: 13-bit signed (LSB[7:3] + MSB[7:0])
         let x13 = (((buf[1] as u16) << 5) | ((buf[0] as u16) >> 3)) as i16;
-        let x = (x13 << 3) >> 3;  // 13-bit sign extend
+        let x = (x13 << 3) >> 3; // 13-bit sign extend
 
         // Y: 13-bit signed
         let y13 = (((buf[3] as u16) << 5) | ((buf[2] as u16) >> 3)) as i16;
-        let y = (y13 << 3) >> 3;  // 13-bit sign extend
+        let y = (y13 << 3) >> 3; // 13-bit sign extend
 
         // Z: 15-bit signed (LSB[7:1] + MSB[7:0])
         let z15 = (((buf[5] as u16) << 7) | ((buf[4] as u16) >> 1)) as i16;
-        let z = (z15 << 1) >> 1;  // 15-bit sign extend
+        let z = (z15 << 1) >> 1; // 15-bit sign extend
 
         // RHALL: 14-bit unsigned (LSB[7:2] + MSB[7:0])
         let rhall = ((buf[7] as u16) << 6) | ((buf[6] as u16) >> 2);
@@ -155,20 +154,42 @@ impl RawData {
     }
 }
 
-/// Compensated magnetometer data [16LSB/µT]
-#[derive(Debug, Clone, Copy, Default)]
-pub struct MagData {
-    pub x: i16,
-    pub y: i16,
-    pub z: i16,
-}
-
 /// Compensated magnetometer data [µT]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Mag {
     pub x: f32,
     pub y: f32,
     pub z: f32,
+}
+
+impl Mag {
+    /// Create new Mag from components
+    pub fn new(x: f32, y: f32, z: f32) -> Self {
+        Self { x, y, z }
+    }
+
+    /// Convert to array
+    pub fn to_array(&self) -> [f32; 3] {
+        [self.x, self.y, self.z]
+    }
+
+    /// Create from array
+    pub fn from_array(arr: [f32; 3]) -> Self {
+        Self {
+            x: arr[0],
+            y: arr[1],
+            z: arr[2],
+        }
+    }
+
+    /// Apply hard-iron offset correction
+    pub fn apply_offset(self, offset: [f32; 3]) -> Self {
+        Self {
+            x: self.x - offset[0],
+            y: self.y - offset[1],
+            z: self.z - offset[2],
+        }
+    }
 }
 
 /// Trim data for compensation
@@ -186,6 +207,7 @@ pub struct TrimData {
     pub dig_xy2: i8,
     pub dig_xyz1: u16,
 }
+
 impl TrimData {
     /// Build TrimData from individual register reads
     pub fn new(
@@ -222,7 +244,6 @@ impl TrimData {
     }
 
     /// Apply compensation to raw data, returns [µT]
-    /// Based on official Bosch BMM150_USE_FLOATING_POINT implementation
     pub fn compensate(&self, raw: &RawData) -> Mag {
         Mag {
             x: self.compensate_x(raw.x, raw.rhall),
@@ -233,16 +254,11 @@ impl TrimData {
 
     /// Compensate X-axis data
     fn compensate_x(&self, mag_data_x: i16, data_rhall: u16) -> f32 {
-        // Overflow condition check
-        if mag_data_x == OVERFLOW_ADCVAL_XYAXES_FLIP
-            || data_rhall == 0
-            || self.dig_xyz1 == 0 {
+        if mag_data_x == OVERFLOW_ADCVAL_XYAXES_FLIP || data_rhall == 0 || self.dig_xyz1 == 0 {
             return OVERFLOW_OUTPUT_FLOAT;
         }
 
         let rhall = data_rhall as f32;
-
-        // Processing compensation equations
         let process_comp_x0 = self.dig_xyz1 as f32 * 16384.0 / rhall;
         let retval = process_comp_x0 - 16384.0;
         let process_comp_x1 = self.dig_xy2 as f32 * retval * retval / 268435456.0;
@@ -255,16 +271,11 @@ impl TrimData {
 
     /// Compensate Y-axis data
     fn compensate_y(&self, mag_data_y: i16, data_rhall: u16) -> f32 {
-        // Overflow condition check
-        if mag_data_y == OVERFLOW_ADCVAL_XYAXES_FLIP
-            || data_rhall == 0
-            || self.dig_xyz1 == 0 {
+        if mag_data_y == OVERFLOW_ADCVAL_XYAXES_FLIP || data_rhall == 0 || self.dig_xyz1 == 0 {
             return OVERFLOW_OUTPUT_FLOAT;
         }
 
         let rhall = data_rhall as f32;
-
-        // Processing compensation equations
         let process_comp_y0 = self.dig_xyz1 as f32 * 16384.0 / rhall;
         let retval = process_comp_y0 - 16384.0;
         let process_comp_y1 = self.dig_xy2 as f32 * retval * retval / 268435456.0;
@@ -277,18 +288,16 @@ impl TrimData {
 
     /// Compensate Z-axis data
     fn compensate_z(&self, mag_data_z: i16, data_rhall: u16) -> f32 {
-        // Overflow condition check
         if mag_data_z == OVERFLOW_ADCVAL_ZAXIS_HALL
             || self.dig_z2 == 0
             || self.dig_z1 == 0
             || self.dig_xyz1 == 0
-            || data_rhall == 0 {
+            || data_rhall == 0
+        {
             return OVERFLOW_OUTPUT_FLOAT;
         }
 
         let rhall = data_rhall as f32;
-
-        // Processing compensation equations
         let process_comp_z0 = mag_data_z as f32 - self.dig_z4 as f32;
         let process_comp_z1 = rhall - self.dig_xyz1 as f32;
         let process_comp_z2 = self.dig_z3 as f32 * process_comp_z1;
@@ -310,52 +319,258 @@ pub struct Bmm150Aux {
 }
 
 impl Bmm150Aux {
-    /// Create new BMM150 AUX state
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Create with specific preset
     pub fn with_preset(mut self, preset: Preset) -> Self {
         self.preset = preset;
         self
     }
 
-    /// Create with specific preset
     pub fn with_data_rate(mut self, data_rate: DataRate) -> Self {
         self.data_rate = data_rate;
         self
     }
 
-    /// Create with specific preset
     pub fn with_op_mode(mut self, op_mode: OpMode) -> Self {
         self.op_mode = op_mode;
         self
     }
 
-    /// Get preset
     pub fn preset(&self) -> Preset {
         self.preset
     }
 
-    /// Get trim data reference
     pub fn trim(&self) -> &TrimData {
         &self.trim
     }
 
-    /// Set trim data (call after reading from device)
     pub fn set_trim(&mut self, trim: TrimData) {
         self.trim = trim;
     }
 
-    /// Parse and compensate raw bytes to Mag [µT]
     pub fn parse_data(&self, buf: &[u8; 8]) -> Mag {
         let raw = RawData::from_bytes(buf);
         self.trim.compensate(&raw)
     }
 
-    /// Compensate raw data to Mag [µT]
     pub fn compensate(&self, raw: &RawData) -> Mag {
         self.trim.compensate(raw)
+    }
+}
+
+// ============================================================================
+// Calibration
+// ============================================================================
+
+/// Maximum number of calibration samples
+pub const MAX_CALIBRATION_SAMPLES: usize = 1000;
+
+/// Default minimum distance squared for sample deduplication [µT²]
+/// 2µT distance → 4µT²
+pub const DEFAULT_MIN_DISTANCE_SQ: f32 = 4.0;
+
+
+
+/// Calibration sample update result
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpdateResult {
+    /// Sample was added to buffer
+    Added,
+    /// Sample was skipped (too close to existing sample)
+    Skipped,
+    /// Buffer is full, no more samples can be added
+    Full,
+}
+
+/// Magnetometer calibrator with sample buffering
+///
+/// Collects samples for calibration with distance-based deduplication.
+/// Supports hard-iron calibration, with soft-iron support planned.
+///
+/// # Example
+///
+/// ```ignore
+/// let mut calibrator = MagCalibrator::new();
+///
+/// // Calibration loop: rotate device in all directions
+/// loop {
+///     let mag = bmm150.parse_data(&buf);
+///     match calibrator.update(&mag) {
+///         UpdateResult::Added => { /* show progress */ }
+///         UpdateResult::Skipped => { /* too close to existing */ }
+///         UpdateResult::Full => break,
+///     }
+/// }
+///
+/// // Get offset and store it
+/// let offset = calibrator.hard_iron_offset();
+/// // → memo this value: [x, y, z]
+///
+/// // Apply calibration in normal operation
+/// let offset = [3.5, 11.5, 6.5]; // hard-coded value
+/// let mag = bmm150.parse_data(&buf).apply_offset(offset);
+/// ```
+pub struct MagCalibrator {
+    samples: Vec<[f32; 3], MAX_CALIBRATION_SAMPLES>,
+    min: [f32; 3],
+    max: [f32; 3],
+    min_distance_sq: f32,
+}
+
+impl Default for MagCalibrator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MagCalibrator {
+    /// Create new calibrator with default settings
+    pub fn new() -> Self {
+        Self {
+            samples: Vec::new(),
+            min: [f32::MAX, f32::MAX, f32::MAX],
+            max: [f32::MIN, f32::MIN, f32::MIN],
+            min_distance_sq: DEFAULT_MIN_DISTANCE_SQ,
+        }
+    }
+
+    /// Create calibrator with custom minimum distance threshold
+    ///
+    /// # Arguments
+    /// * `min_distance` - Minimum distance in µT between samples
+    pub fn with_min_distance(mut self, min_distance: f32) -> Self {
+        self.min_distance_sq = min_distance * min_distance;
+        self
+    }
+
+    /// Reset calibrator, clearing all samples
+    pub fn reset(&mut self) {
+        self.samples.clear();
+        self.min = [f32::MAX, f32::MAX, f32::MAX];
+        self.max = [f32::MIN, f32::MIN, f32::MIN];
+    }
+
+    /// Update calibrator with new magnetometer sample
+    ///
+    /// The sample is only added if it's far enough from all existing samples
+    /// (based on minimum distance threshold).
+    pub fn update(&mut self, mag: &Mag) -> UpdateResult {
+        if self.samples.is_full() {
+            return UpdateResult::Full;
+        }
+
+        let point = [mag.x, mag.y, mag.z];
+
+        // Check distance to all existing samples
+        if self.is_too_close(&point) {
+            return UpdateResult::Skipped;
+        }
+
+        // Update min/max
+        for i in 0..3 {
+            self.min[i] = self.min[i].min(point[i]);
+            self.max[i] = self.max[i].max(point[i]);
+        }
+
+        // Add sample (unwrap is safe, we checked is_full above)
+        let _ = self.samples.push(point);
+
+        UpdateResult::Added
+    }
+
+    /// Check if point is too close to any existing sample
+    fn is_too_close(&self, point: &[f32; 3]) -> bool {
+        for sample in self.samples.iter() {
+            let dx = point[0] - sample[0];
+            let dy = point[1] - sample[1];
+            let dz = point[2] - sample[2];
+            let dist_sq = dx * dx + dy * dy + dz * dz;
+
+            if dist_sq < self.min_distance_sq {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Get current sample count
+    pub fn sample_count(&self) -> usize {
+        self.samples.len()
+    }
+
+    /// Check if buffer is full
+    pub fn is_full(&self) -> bool {
+        self.samples.is_full()
+    }
+
+    /// Get minimum values for each axis [µT]
+    pub fn min(&self) -> [f32; 3] {
+        self.min
+    }
+
+    /// Get maximum values for each axis [µT]
+    pub fn max(&self) -> [f32; 3] {
+        self.max
+    }
+
+    /// Get range (max - min) for each axis [µT]
+    pub fn range(&self) -> [f32; 3] {
+        [
+            self.max[0] - self.min[0],
+            self.max[1] - self.min[1],
+            self.max[2] - self.min[2],
+        ]
+    }
+
+    /// Get current offset estimate (center of min/max bounds)
+    pub fn current_offset(&self) -> [f32; 3] {
+        [
+            (self.min[0] + self.max[0]) / 2.0,
+            (self.min[1] + self.max[1]) / 2.0,
+            (self.min[2] + self.max[2]) / 2.0,
+        ]
+    }
+
+    /// Get reference to collected samples (for soft-iron calibration)
+    pub fn samples(&self) -> &[[f32; 3]] {
+        &self.samples
+    }
+
+    /// Get hard-iron offset from collected samples
+    ///
+    /// Uses min/max method to find sphere center offset.
+    pub fn hard_iron_offset(&self) -> [f32; 3] {
+        self.current_offset()
+    }
+
+    /// Quality indicator: estimated sphere coverage
+    ///
+    /// Returns a value from 0.0 to 1.0 indicating how well the samples
+    /// cover the expected sphere. Based on range consistency across axes.
+    ///
+    /// - 1.0: All axes have similar range (good sphere coverage)
+    /// - 0.0: One or more axes have very small range (poor coverage)
+    pub fn quality(&self) -> f32 {
+        if self.samples.len() < 10 {
+            return 0.0;
+        }
+
+        let range = self.range();
+        let max_range = range[0].max(range[1]).max(range[2]);
+
+        if max_range < 1.0 {
+            return 0.0;
+        }
+
+        // Calculate ratio of min range to max range
+        let min_range = range[0].min(range[1]).min(range[2]);
+        let ratio = min_range / max_range;
+
+        // Scale by sample count (more samples = higher confidence)
+        let sample_factor = (self.samples.len() as f32 / 100.0).min(1.0);
+
+        ratio * sample_factor
     }
 }
