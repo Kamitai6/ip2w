@@ -149,6 +149,7 @@ pub struct ImuEkf {
     last_gyro: [f32; 3],
     initialized: bool,
     continuous: [ContinuousAngle; 3],
+    yaw_offset: f32,
 }
 
 impl ImuEkf {
@@ -186,6 +187,7 @@ impl ImuEkf {
             last_gyro: [0.0; 3],
             initialized: false,
             continuous: [ContinuousAngle::default(); 3],
+            yaw_offset: 0.0,
         }
     }
 
@@ -198,6 +200,14 @@ impl ImuEkf {
         if norm > EPSILON {
             self.mag_ref = Some(Vector3::new(mx / norm, my / norm, mz / norm));
         }
+    }
+
+    /// X軸が上向きの座標系で基準磁場を設定
+    /// 
+    /// X_up状態で、キャリブレーション済み磁力計データを渡す
+    pub fn set_mag_reference_x_up(&mut self, mx: f32, my: f32, mz: f32) {
+        // update_mag_x_up と同じ変換を適用
+        self.set_mag_reference(-mz, my, mx)
     }
 
     /// 基準磁場ベクトルをクリア
@@ -558,18 +568,26 @@ impl ImuEkf {
         }
     }
 
+    /// 現在のYaw角を0としてリセット
+    pub fn reset_yaw(&mut self) {
+        let (_, _, yaw) = self.get_euler();
+        self.yaw_offset = yaw;
+        self.continuous[2].reset();
+    }
+
     fn build_current_state(&mut self, accel_valid: bool) -> AttitudeState {
         let q = Quaternion::new(self.x[0], self.x[1], self.x[2], self.x[3]);
         let q_unit = UnitQuaternion::from_quaternion(q);
         let (roll, pitch, yaw) = q_unit.euler_angles();
+        let yaw_corrected = yaw - self.yaw_offset;  // オフセット適用
 
         AttitudeState {
             roll,
             pitch,
-            yaw,
+            yaw: yaw_corrected,
             continuous_roll: self.continuous[0].update(roll),
             continuous_pitch: self.continuous[1].update(pitch),
-            continuous_yaw: self.continuous[2].update(yaw),
+            continuous_yaw: self.continuous[2].update(yaw_corrected),
             roll_rate: self.last_gyro[0] - self.x[4],
             pitch_rate: self.last_gyro[1] - self.x[5],
             yaw_rate: self.last_gyro[2] - self.x[6],
@@ -627,6 +645,7 @@ impl ImuEkf {
         self.x = StateVector::from_row_slice(&[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
         self.initialized = false;
         self.mag_ref = None;
+        self.yaw_offset = 0.0;
 
         let pq = self.config.initial_quat_variance;
         let pb = self.config.initial_bias_variance;

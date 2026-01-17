@@ -182,7 +182,7 @@ impl Mag {
         }
     }
 
-    /// Apply hard-iron offset correction
+    /// Apply hard-iron offset correction (deprecated, use MagCalibration)
     pub fn apply_offset(self, offset: [f32; 3]) -> Self {
         Self {
             x: self.x - offset[0],
@@ -371,8 +371,6 @@ pub const MAX_CALIBRATION_SAMPLES: usize = 1000;
 /// 2µT distance → 4µT²
 pub const DEFAULT_MIN_DISTANCE_SQ: f32 = 4.0;
 
-
-
 /// Calibration sample update result
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UpdateResult {
@@ -384,10 +382,73 @@ pub enum UpdateResult {
     Full,
 }
 
+/// Magnetometer calibration parameters (hard-iron + soft-iron)
+///
+/// Apply to raw magnetometer readings:
+/// ```ignore
+/// let calib = MagCalibration::new(
+///     [3.5, 11.5, 6.5],   // offset from calibrator.hard_iron_offset()
+///     [1.0, 0.95, 1.05],  // scale from calibrator.soft_iron_scale()
+/// );
+/// let mag_corrected = calib.apply(&mag_raw);
+/// ```
+#[derive(Debug, Clone, Copy)]
+pub struct MagCalibration {
+    /// Hard-iron offset [µT]
+    pub offset: [f32; 3],
+    /// Soft-iron scale factors (normalized to average range)
+    pub scale: [f32; 3],
+}
+
+impl Default for MagCalibration {
+    fn default() -> Self {
+        Self {
+            offset: [0.0, 0.0, 0.0],
+            scale: [1.0, 1.0, 1.0],
+        }
+    }
+}
+
+impl MagCalibration {
+    /// Create new calibration with offset and scale
+    pub fn new(offset: [f32; 3], scale: [f32; 3]) -> Self {
+        Self { offset, scale }
+    }
+
+    /// Create calibration with offset only (no soft-iron correction)
+    pub fn with_offset(offset: [f32; 3]) -> Self {
+        Self {
+            offset,
+            scale: [1.0, 1.0, 1.0],
+        }
+    }
+
+    /// Apply calibration to magnetometer reading
+    ///
+    /// Order: subtract offset first, then apply scale
+    /// corrected = (raw - offset) * scale
+    pub fn apply(&self, mag: &Mag) -> Mag {
+        Mag {
+            x: (mag.x - self.offset[0]) * self.scale[0],
+            y: (mag.y - self.offset[1]) * self.scale[1],
+            z: (mag.z - self.offset[2]) * self.scale[2],
+        }
+    }
+
+    /// Apply calibration to array
+    pub fn apply_array(&self, mag: [f32; 3]) -> [f32; 3] {
+        [
+            (mag[0] - self.offset[0]) * self.scale[0],
+            (mag[1] - self.offset[1]) * self.scale[1],
+            (mag[2] - self.offset[2]) * self.scale[2],
+        ]
+    }
+}
+
 /// Magnetometer calibrator with sample buffering
 ///
 /// Collects samples for calibration with distance-based deduplication.
-/// Supports hard-iron calibration, with soft-iron support planned.
+/// Supports both hard-iron and soft-iron (axis scaling) calibration.
 ///
 /// # Example
 ///
@@ -404,13 +465,20 @@ pub enum UpdateResult {
 ///     }
 /// }
 ///
-/// // Get offset and store it
+/// // Get calibration parameters
 /// let offset = calibrator.hard_iron_offset();
-/// // → memo this value: [x, y, z]
+/// let scale = calibrator.soft_iron_scale();
 ///
-/// // Apply calibration in normal operation
-/// let offset = [3.5, 11.5, 6.5]; // hard-coded value
-/// let mag = bmm150.parse_data(&buf).apply_offset(offset);
+/// // Display for user to copy:
+/// // offset: [3.5, 11.5, 6.5]
+/// // scale: [1.0, 0.95, 1.05]
+///
+/// // In production code, use hard-coded values:
+/// let calib = MagCalibration::new(
+///     [3.5, 11.5, 6.5],
+///     [1.0, 0.95, 1.05],
+/// );
+/// let mag_corrected = calib.apply(&mag_raw);
 /// ```
 pub struct MagCalibrator {
     samples: Vec<[f32; 3], MAX_CALIBRATION_SAMPLES>,
@@ -533,7 +601,7 @@ impl MagCalibrator {
         ]
     }
 
-    /// Get reference to collected samples (for soft-iron calibration)
+    /// Get reference to collected samples (for advanced calibration)
     pub fn samples(&self) -> &[[f32; 3]] {
         &self.samples
     }
@@ -543,6 +611,43 @@ impl MagCalibrator {
     /// Uses min/max method to find sphere center offset.
     pub fn hard_iron_offset(&self) -> [f32; 3] {
         self.current_offset()
+    }
+
+    /// Get soft-iron scale factors from collected samples
+    ///
+    /// Calculates scale factors to normalize each axis range to the average range.
+    /// This corrects for ellipsoid distortion along sensor axes.
+    ///
+    /// Returns [1.0, 1.0, 1.0] if insufficient data or invalid ranges.
+    pub fn soft_iron_scale(&self) -> [f32; 3] {
+        let range = self.range();
+
+        // Need minimum range to calculate meaningful scale
+        const MIN_VALID_RANGE: f32 = 5.0; // µT
+
+        // Check all axes have sufficient range
+        if range[0] < MIN_VALID_RANGE || range[1] < MIN_VALID_RANGE || range[2] < MIN_VALID_RANGE {
+            return [1.0, 1.0, 1.0];
+        }
+
+        // Calculate average range (expected sphere diameter)
+        let avg_range = (range[0] + range[1] + range[2]) / 3.0;
+
+        // Scale each axis to match average range
+        // scale[i] = avg_range / range[i]
+        [
+            avg_range / range[0],
+            avg_range / range[1],
+            avg_range / range[2],
+        ]
+    }
+
+    /// Get complete calibration (hard-iron + soft-iron)
+    pub fn calibration(&self) -> MagCalibration {
+        MagCalibration {
+            offset: self.hard_iron_offset(),
+            scale: self.soft_iron_scale(),
+        }
     }
 
     /// Quality indicator: estimated sphere coverage

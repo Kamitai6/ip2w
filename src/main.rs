@@ -28,7 +28,7 @@ use embedded_graphics::{
     prelude::{IntoStorage, RgbColor, Point, Size, DrawTarget, Primitive},
     pixelcolor::Rgb565,
     mono_font::{
-        ascii::FONT_10X20,
+        ascii::{FONT_10X20, FONT_6X10},
         MonoTextStyleBuilder,
     },
     text::{Alignment, Text},
@@ -171,10 +171,10 @@ fn main() -> ! {
     imu.write_acc_offset((33, -123, -144));
     /* always calibration */
     imu.calibrate_gyro(|us| delay.delay_micros(us)).unwrap();
-    let mut mag_calibrator = bmm150::MagCalibrator::new();
 
     use alloc::format;
-    // // キャリブレーションループ内
+    // // 地磁気キャリブレーションループ
+    // let mut mag_calibrator = bmm150::MagCalibrator::new();
     // loop {
     //     let mag = imu.read_mag().unwrap().unwrap();
     //     match mag_calibrator.update(&mag) {
@@ -206,26 +206,40 @@ fn main() -> ! {
 
     // // 終了後：オフセット表示（3行に分ける）
     // let offset = mag_calibrator.hard_iron_offset();
+    // let scale = mag_calibrator.soft_iron_scale();
     // display.clear(Rgb565::BLACK).unwrap();
     // let style = MonoTextStyleBuilder::new()
-    //     .font(&FONT_10X20)
+    //     .font(&FONT_6X10)
     //     .text_color(Rgb565::GREEN)
     //     .build();
-    // Text::with_alignment("DONE", Point::new(64, 20), style, Alignment::Center)
+    // Text::with_alignment("CALIBRATION DONE", Point::new(64, 12), style, Alignment::Center)
     //     .draw(&mut display).unwrap();
+    // Text::new("-- OFFSET --", Point::new(5, 30), style).draw(&mut display).unwrap();
     // let text = format!("X: {:.1}", offset[0]);
-    // Text::new(&text, Point::new(5, 50), style).draw(&mut display).unwrap();
+    // Text::new(&text, Point::new(5, 42), style).draw(&mut display).unwrap();
     // let text = format!("Y: {:.1}", offset[1]);
-    // Text::new(&text, Point::new(5, 75), style).draw(&mut display).unwrap();
+    // Text::new(&text, Point::new(5, 54), style).draw(&mut display).unwrap();
     // let text = format!("Z: {:.1}", offset[2]);
-    // Text::new(&text, Point::new(5, 100), style).draw(&mut display).unwrap();
+    // Text::new(&text, Point::new(5, 66), style).draw(&mut display).unwrap();
+    // Text::new("-- SCALE --", Point::new(5, 84), style).draw(&mut display).unwrap();
+    // let text = format!("X: {:.3}", scale[0]);
+    // Text::new(&text, Point::new(5, 96), style).draw(&mut display).unwrap();
+    // let text = format!("Y: {:.3}", scale[1]);
+    // Text::new(&text, Point::new(5, 108), style).draw(&mut display).unwrap();
+    // let text = format!("Z: {:.3}", scale[2]);
+    // Text::new(&text, Point::new(5, 120), style).draw(&mut display).unwrap();
     // display.flush().unwrap();
-    let mag_offset = [48.1, -1053.6, -751.6];
+    // loop {}
+    let mag_calib = bmm150::MagCalibration::new(
+        [65.1, -1099.7, -805.5],   // offset
+        [1.212, 0.752, 1.184],  // scale
+    );
 
+    // 水平状態で基準磁場を設定
     // while button.is_high() {}
     // delay.delay_millis(1000);
-    // // 水平状態で基準磁場を設定
-    // let mag = imu.read_mag().unwrap().unwrap().apply_offset(mag_offset);
+    // let mag_raw = imu.read_mag().unwrap().unwrap();
+    // let mag = mag_calib.apply(&mag_raw);
     // display.clear(Rgb565::BLACK).unwrap();
     // let style = MonoTextStyleBuilder::new()
     //     .font(&FONT_10X20)
@@ -240,7 +254,8 @@ fn main() -> ! {
     // let text = format!("Z: {:.1}", mag.z);
     // Text::new(&text, Point::new(5, 100), style).draw(&mut display).unwrap();
     // display.flush().unwrap();
-    let mag_ref = [7.1, 11.4, -6.1];
+    // loop {}
+    let mag_ref = [11.6, 20.8, 19.7];
 
     let mut ekf = imu_ekf::ImuEkf::new(
         imu_ekf::EkfConfig {
@@ -253,7 +268,7 @@ fn main() -> ! {
             mag_noise: 0.5,
             ..Default::default()
     });
-    ekf.set_mag_reference(mag_ref[0], mag_ref[1], mag_ref[2]); // リファレンスはZ-upでとった
+    ekf.set_mag_reference_x_up(mag_ref[0], mag_ref[1], mag_ref[2]); // リファレンスはZ-upでとった
 
     let i2c1 = I2c::new(peripherals.I2C1, 
         I2cConfig::default()
@@ -330,7 +345,8 @@ fn main() -> ! {
                         let (ax, ay, az) = (d.accel.x, d.accel.y, d.accel.z);
                         let (gx, gy, gz) = imu_ekf::degree_to_rad((d.gyro.x, d.gyro.y, d.gyro.z));
                         let mag_raw = d.mag.unwrap();
-                        let mag = mag_raw.apply_offset(mag_offset);
+                        let mag = mag_calib.apply(&mag_raw);
+                        let norm = libm::sqrtf(mag.x * mag.x + mag.y * mag.y + mag.z * mag.z);
                         let (mx, my, mz) = (mag.x, mag.y, mag.z);
                         let state = ekf.update_x_up(ax, ay, az, gx, gy, gz);
                         if counter % 10 == 0 {
@@ -339,7 +355,7 @@ fn main() -> ! {
                         if counter % 100 == 0 {
                         //     info!("a={}, {}, {}", ax, ay, az);
                         //     info!("g={}, {}, {}", gx, gy, gz);
-                        //     info!("m={}, {}, {}", mx, my, mz);
+                            // info!("mag=({:01},{:01},{:01}) norm={:01}", mx, my, mz, norm);
                             info!("r={}, {}, {}", state.roll, state.pitch, state.yaw);
                         }
                         counter += 1;
@@ -349,9 +365,9 @@ fn main() -> ! {
                         }
                         button_state = button.is_low();
 
-                        // if state.roll.abs() > 1.0 || state.pitch.abs() > 1.0 {
-                        //     drive = false;
-                        // }
+                        if state.roll.abs() > 1.0 || state.pitch.abs() > 1.0 {
+                            drive = false;
+                        }
 
                         if drive {
                             let now_angle = state.pitch - 0.125;
@@ -365,7 +381,7 @@ fn main() -> ! {
                             let yaw_e = 0.0 - state.yaw;
                             let yaw_e_dot = 0.0 - gz;
                             let yaw_result = yaw_pid.update_with_d(yaw_e, yaw_e_dot);
-                            let yaw_out_max = atom_motion::MOTOR_SPEED_MAX as f32 / 3.0;
+                            let yaw_out_max = atom_motion::MOTOR_SPEED_MAX as f32 / 4.0;
                             let yaw_out = yaw_result.clamp(-yaw_out_max, yaw_out_max);
                             
                             m1_pwm = (base_out + yaw_out).clamp(-atom_max, atom_max) as i8;
@@ -378,6 +394,7 @@ fn main() -> ! {
                             smc.reset();
                             yaw_pid.reset();
                             pos_regulator.reset();
+                            ekf.reset_yaw();
                         }
                         let _ = motion.set_motor(atom_motion::MotorChannel::M1, m1_pwm);
                         let _ = motion.set_motor(atom_motion::MotorChannel::M2, m2_pwm);
