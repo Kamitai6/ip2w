@@ -59,6 +59,12 @@ const PERIOD_US: u64 = 1_000_000 / FREQUENCY as u64;
 const DT: f32 = 1.0 / FREQUENCY as f32;
 const U_MAX: f32 = 300.0;
 
+const MOTION_DIV: u32 = 1;
+const DISPLAY_DIV: u32 = 10;
+const TEMP_DIV: u32 = 500;
+const MAG_DIV: u32 = 10;
+const PRINT_DIV: u32 = 100;
+
 static TIMER0: Mutex<RefCell<Option<Timg>>> = Mutex::new(RefCell::new(None));
 pub static TIMER_COUNTER: Mutex<Cell<u32>> = Mutex::new(Cell::new(0));
 
@@ -169,8 +175,20 @@ fn main() -> ! {
     // let (ax, ay, az) = imu.read_acc_offset();
     // info!("AccelOffset: x={}, y={}, z={}", ax, ay, az);
     imu.write_acc_offset((33, -123, -144));
-    /* always calibration */
-    imu.calibrate_gyro(|us| delay.delay_micros(us)).unwrap();
+
+    // imu.calibrate_gyro(|us| delay.delay_micros(us)).unwrap();
+    // // 冷えた状態
+    // let (temp1, offset1) = imu.capture_gyr_temp_point(|us| delay.delay_micros(us)).unwrap();
+    // defmt::info!("{}, {}, {}, {}", temp1, offset1.0, offset1.1, offset1.2);
+    // loop {}
+    // // 温まった状態
+    // let (temp2, offset2) = imu.capture_gyr_temp_point(|us| delay.delay_micros(us)).unwrap();
+    // defmt::info!("{}, {}, {}, {}", temp2, offset2.0, offset2.1, offset2.2);
+    // loop {}
+    let calib = bmi270::GyrTempCalibration::from_two_points(
+        29.734032, (-3, 2, -5), 
+        47.609695, (-5, -13, -13));
+    imu.set_gyr_temp_calibration(calib, 1.0);  // 時定数1秒
 
     use alloc::format;
     // // 地磁気キャリブレーションループ
@@ -255,7 +273,7 @@ fn main() -> ! {
     // Text::new(&text, Point::new(5, 100), style).draw(&mut display).unwrap();
     // display.flush().unwrap();
     // loop {}
-    let mag_ref = [11.6, 20.8, 19.7];
+    let mag_ref = [-2.1, 29.5, 56.4];
 
     let mut ekf = imu_ekf::ImuEkf::new(
         imu_ekf::EkfConfig {
@@ -263,9 +281,7 @@ fn main() -> ! {
             gyro_noise: 0.05,
             gyro_bias_noise: 0.0005,
             accel_noise: 0.15,
-            accel_magnitude_min: 0.5,
-            accel_magnitude_max: 1.5,
-            mag_noise: 0.5,
+            mag_noise: 5.0,
             ..Default::default()
     });
     ekf.set_mag_reference_x_up(mag_ref[0], mag_ref[1], mag_ref[2]); // リファレンスはZ-upでとった
@@ -306,7 +322,7 @@ fn main() -> ! {
         .with_max(45.0, 5.0)
         .with_lowpass(5.0);
 
-    let mut yaw_pid = pid::PID::new(DT, 1.0, 0.0, 20.0);
+    let mut yaw_pid = pid::PID::new(DT, 10.0, 0.0, 20.0);
     
     // esp_rtos::start(timg0.timer0);
     // let radio_init = esp_radio::init().expect("Failed to initialize Wi-Fi/BLE controller");
@@ -341,6 +357,10 @@ fn main() -> ! {
                     events::Event::MotionUpdate => {
                         let start = Instant::now();
 
+                        // ループ内
+                        if counter % TEMP_DIV == 0 {
+                            imu.update_gyr_temp_compensation(DT * TEMP_DIV as f32).unwrap();
+                        }
                         let d = imu.read_immu().unwrap();
                         let (ax, ay, az) = (d.accel.x, d.accel.y, d.accel.z);
                         let (gx, gy, gz) = imu_ekf::degree_to_rad((d.gyro.x, d.gyro.y, d.gyro.z));
@@ -349,14 +369,17 @@ fn main() -> ! {
                         let norm = libm::sqrtf(mag.x * mag.x + mag.y * mag.y + mag.z * mag.z);
                         let (mx, my, mz) = (mag.x, mag.y, mag.z);
                         let state = ekf.update_x_up(ax, ay, az, gx, gy, gz);
-                        if counter % 10 == 0 {
+                        
+                        if counter % MAG_DIV == 0 {
                             ekf.update_mag_x_up(mag.x, mag.y, mag.z);
                         }
-                        if counter % 100 == 0 {
+                        if counter % PRINT_DIV == 0 {
+                            info!("mag_raw=({},{},{})", mag_raw.x, mag_raw.y, mag_raw.z);
+                            info!("mag_cal=({},{},{})", mag.x, mag.y, mag.z);
                         //     info!("a={}, {}, {}", ax, ay, az);
                         //     info!("g={}, {}, {}", gx, gy, gz);
                             // info!("mag=({:01},{:01},{:01}) norm={:01}", mx, my, mz, norm);
-                            info!("r={}, {}, {}", state.roll, state.pitch, state.yaw);
+                            // info!("r={}, {}, {}", state.roll, state.pitch, state.yaw);
                         }
                         counter += 1;
 
@@ -378,7 +401,7 @@ fn main() -> ! {
                             let atom_max = atom_motion::MOTOR_SPEED_MAX as f32;
                             let base_out = deadzone::apply_deadzone(fb + ff, U_MAX, 30.0, atom_max); //(限界-5)程度にするのが最適っぽいな
 
-                            let yaw_e = 0.0 - state.yaw;
+                            let yaw_e = 0.0 - state.continuous_yaw;
                             let yaw_e_dot = 0.0 - gz;
                             let yaw_result = yaw_pid.update_with_d(yaw_e, yaw_e_dot);
                             let yaw_out_max = atom_motion::MOTOR_SPEED_MAX as f32 / 4.0;
@@ -412,15 +435,15 @@ fn main() -> ! {
                         }
                         
                         let elapsed = start.elapsed();
-                        if counter % 100 == 0 {
-                            // info!("loop {} elapsed: {}us", counter, elapsed.as_micros());
-                        }
+                        // if counter % 100 == 0 {
+                        //     info!("loop {} elapsed: {}us", counter, elapsed.as_micros());
+                        // }
                     }
                     events::Event::DisplayUpdate => {
                         if display.is_idle() {
                             display.clear(Rgb565::BLACK).unwrap();
 
-                            face.update(&mut display, DT * 10.0).unwrap();
+                            face.update(&mut display, DT * DISPLAY_DIV as f32).unwrap();
 
                             display.flush_async().unwrap();
                         }
@@ -439,12 +462,10 @@ fn tg0_t0_handler() {
         if let Some(timer) = TIMER0.borrow_ref_mut(cs).as_mut() {
             timer.clear_interrupt();
 
-            let div = 1;
-            if counter % div == 0 {
+            if counter % MOTION_DIV == 0 {
                 events::post_event(events::Event::MotionUpdate);
             }
-            let div = div * 10;
-            if counter % div == 0 {
+            if counter % DISPLAY_DIV == 0 {
                 events::post_event(events::Event::DisplayUpdate);
             }
             TIMER_COUNTER.borrow(cs).set(counter + 1);

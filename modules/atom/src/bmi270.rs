@@ -292,6 +292,88 @@ impl FocAccConfig {
 }
 
 // ============================================================================
+// Temperature Compensation Types
+// ============================================================================
+
+/// Gyroscope temperature calibration data
+/// 
+/// Stores linear calibration parameters for temperature compensation.
+/// offset(T) = ref_offset + slope × (T - ref_temp)
+#[derive(Debug, Clone, Copy)]
+pub struct GyrTempCalibration {
+    /// Reference temperature [°C]
+    pub ref_temp: f32,
+    /// Reference offset at ref_temp [LSB]
+    pub ref_offset: (i32, i32, i32),
+    /// Slope [LSB/°C] for each axis
+    pub slope: (f32, f32, f32),
+}
+
+impl GyrTempCalibration {
+    /// Create calibration from two temperature points
+    /// 
+    /// # Arguments
+    /// * `temp1`, `offset1` - First calibration point (temperature [°C], offset [LSB])
+    /// * `temp2`, `offset2` - Second calibration point (temperature [°C], offset [LSB])
+    pub fn from_two_points(
+        temp1: f32, offset1: (i32, i32, i32),
+        temp2: f32, offset2: (i32, i32, i32),
+    ) -> Self {
+        let dt = temp2 - temp1;
+        let slope = if dt.abs() > 0.1 {
+            (
+                (offset2.0 - offset1.0) as f32 / dt,
+                (offset2.1 - offset1.1) as f32 / dt,
+                (offset2.2 - offset1.2) as f32 / dt,
+            )
+        } else {
+            (0.0, 0.0, 0.0)
+        };
+
+        Self {
+            ref_temp: temp1,
+            ref_offset: offset1,
+            slope,
+        }
+    }
+
+    /// Create calibration with explicit parameters
+    pub fn new(ref_temp: f32, ref_offset: (i32, i32, i32), slope: (f32, f32, f32)) -> Self {
+        Self { ref_temp, ref_offset, slope }
+    }
+
+    /// Calculate offset at specified temperature
+    pub fn offset_at(&self, temp: f32) -> (i32, i32, i32) {
+        let dt = temp - self.ref_temp;
+        (
+            self.ref_offset.0 + (self.slope.0 * dt) as i32,
+            self.ref_offset.1 + (self.slope.1 * dt) as i32,
+            self.ref_offset.2 + (self.slope.2 * dt) as i32,
+        )
+    }
+}
+
+/// Internal state for gyroscope temperature compensation
+#[derive(Debug, Clone, Copy)]
+struct GyrTempCompensation {
+    calib: GyrTempCalibration,
+    filtered_temp: f32,
+    time_constant: f32,
+    initialized: bool,
+}
+
+impl GyrTempCompensation {
+    fn new(calib: GyrTempCalibration, time_constant: f32) -> Self {
+        Self {
+            calib,
+            filtered_temp: 0.0,
+            time_constant,
+            initialized: false,
+        }
+    }
+}
+
+// ============================================================================
 // Data Types
 // ============================================================================
 
@@ -388,6 +470,7 @@ pub struct Bmi270<I2C> {
     acc_offset: (i32, i32, i32),
     gyr_offset: (i32, i32, i32),
     mag: Option<Bmm150Aux>,
+    gyr_temp_comp: Option<GyrTempCompensation>,
 }
 
 impl<I2C: I2c> Bmi270<I2C> {
@@ -401,6 +484,7 @@ impl<I2C: I2c> Bmi270<I2C> {
             acc_offset: (0, 0, 0),
             gyr_offset: (0, 0, 0),
             mag: None,
+            gyr_temp_comp: None,
         }
     }
 
@@ -488,7 +572,7 @@ impl<I2C: I2c> Bmi270<I2C> {
     fn init_mag<D: FnMut(u32)>(&mut self, delay: &mut D, config: Config) -> Result<(), Error<I2C::Error>> {
         let preset = self.mag.as_ref().map(|m| m.preset()).unwrap_or_default();
 
-        self.write_reg(reg::AUX_IF_TRIM, 0x02)?; // 0x02 10kΩ, 0x03 2kΩ
+        self.write_reg(reg::AUX_IF_TRIM, 0x03)?; // 0x02 10kΩ, 0x03 2kΩ
         self.write_reg(reg::AUX_CONF, config.aux_odr as u8)?;
         self.write_reg(reg::AUX_DEV_ID, bmm150::DEFAULT_ADDR << 1)?;
         self.write_reg(reg::AUX_IF_CONF, 0x80 | 0x40 | 0x0F)?; // manual_en, fcu_write_en, rd_burst
@@ -602,7 +686,7 @@ impl<I2C: I2c> Bmi270<I2C> {
 
     fn aux_read_buf<D: FnMut(u32)>(&mut self, bmm_reg: u8, buf: &mut [u8], delay: &mut D) -> Result<(), I2C::Error> {
         self.write_reg(reg::AUX_RD, bmm_reg)?;
-        delay(1000);
+        delay(1000); // 1ms (これマジ大事)
         self.read_regs(reg::AUX_X_LSB, buf)
     }
 
@@ -970,6 +1054,123 @@ impl<I2C: I2c> Bmi270<I2C> {
     /// Write gyroscope offset [LSB]
     pub fn write_gyr_offset(&mut self, offset: (i32, i32, i32)) {
         self.gyr_offset = offset;
+    }
+
+    // ========================================================================
+    // Gyroscope Temperature Compensation
+    // ========================================================================
+
+    /// Set gyroscope temperature calibration
+    ///
+    /// # Arguments
+    /// * `calib` - Temperature calibration data from two-point calibration
+    /// * `time_constant` - Low-pass filter time constant [s] (e.g., 1.0)
+    pub fn set_gyr_temp_calibration(&mut self, calib: GyrTempCalibration, time_constant: f32) {
+        self.gyr_temp_comp = Some(GyrTempCompensation::new(calib, time_constant));
+    }
+
+    /// Clear gyroscope temperature calibration
+    pub fn clear_gyr_temp_calibration(&mut self) {
+        self.gyr_temp_comp = None;
+    }
+
+    /// Update gyroscope offset based on current temperature
+    ///
+    /// Call this periodically (e.g., every 100 loops) to update the gyroscope
+    /// offset based on the filtered temperature reading.
+    ///
+    /// # Arguments
+    /// * `dt` - Time since last call [s]
+    ///
+    /// # Returns
+    /// * `Ok(Some(temp))` - Updated with filtered temperature
+    /// * `Ok(None)` - Temperature compensation not configured
+    /// * `Err(e)` - I2C error
+    pub fn update_gyr_temp_compensation(&mut self, dt: f32) -> Result<Option<f32>, I2C::Error> {
+        // 先に「有効かどうか」だけ判定しておく
+        if self.gyr_temp_comp.is_none() {
+            return Ok(None);
+        }
+
+        let temp = self.read_temperature()?;
+
+        let comp = self.gyr_temp_comp.as_mut().unwrap();
+
+        if !comp.initialized {
+            comp.filtered_temp = temp;
+            comp.initialized = true;
+        } else {
+            // 1st order low-pass filter: alpha = dt / (tau + dt)
+            let alpha = dt / (comp.time_constant + dt);
+            comp.filtered_temp += alpha * (temp - comp.filtered_temp);
+        }
+
+        let offset = comp.calib.offset_at(comp.filtered_temp);
+        self.gyr_offset = offset;
+
+        Ok(Some(comp.filtered_temp))
+    }
+
+    /// Get current filtered temperature [°C]
+    ///
+    /// Returns None if temperature compensation is not configured or not yet initialized.
+    pub fn filtered_temperature(&self) -> Option<f32> {
+        self.gyr_temp_comp
+            .as_ref()
+            .filter(|c| c.initialized)
+            .map(|c| c.filtered_temp)
+    }
+
+    /// Capture gyroscope temperature calibration point
+    ///
+    /// Use this during calibration to capture temperature and offset pairs.
+    /// Sensor must be stationary during capture (~1s).
+    ///
+    /// # Arguments
+    /// * `delay` - Delay function taking microseconds [µs]
+    ///
+    /// # Returns
+    /// * Temperature [°C] and offset [LSB] tuple
+    pub fn capture_gyr_temp_point<D: FnMut(u32)>(
+        &mut self,
+        mut delay: D,
+    ) -> Result<(f32, (i32, i32, i32)), Error<I2C::Error>> {
+        const NUM_SAMPLES: i32 = 1000;
+
+        // Ensure gyroscope is enabled
+        let pwr = self.read_reg(reg::PWR_CTRL)?;
+        if (pwr & pwr_ctrl::GYR_EN) == 0 {
+            self.write_reg(reg::PWR_CTRL, pwr | pwr_ctrl::GYR_EN)?;
+            delay(100000); // 100ms
+        }
+
+        // Disable advanced power save
+        self.write_reg(reg::PWR_CONF, 0x00)?;
+        delay(1000);
+
+        // Collect samples
+        let mut sum_x: i32 = 0;
+        let mut sum_y: i32 = 0;
+        let mut sum_z: i32 = 0;
+        let mut sum_temp: f32 = 0.0;
+
+        for _ in 0..NUM_SAMPLES {
+            delay(1000); // 1ms
+            let raw = self.read_gyro_raw_internal()?;
+            sum_x += raw.x as i32;
+            sum_y += raw.y as i32;
+            sum_z += raw.z as i32;
+            sum_temp += self.read_temperature()?;
+        }
+
+        let avg_temp = sum_temp / NUM_SAMPLES as f32;
+        let avg_offset = (
+            sum_x / NUM_SAMPLES,
+            sum_y / NUM_SAMPLES,
+            sum_z / NUM_SAMPLES,
+        );
+
+        Ok((avg_temp, avg_offset))
     }
 
     // ========================================================================
