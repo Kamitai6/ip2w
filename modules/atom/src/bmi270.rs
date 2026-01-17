@@ -488,7 +488,7 @@ impl<I2C: I2c> Bmi270<I2C> {
     fn init_mag<D: FnMut(u32)>(&mut self, delay: &mut D, config: Config) -> Result<(), Error<I2C::Error>> {
         let preset = self.mag.as_ref().map(|m| m.preset()).unwrap_or_default();
 
-        self.write_reg(reg::AUX_IF_TRIM, 0x03)?; // 0x02 10kΩ, 0x03 2kΩ
+        self.write_reg(reg::AUX_IF_TRIM, 0x02)?; // 0x02 10kΩ, 0x03 2kΩ
         self.write_reg(reg::AUX_CONF, config.aux_odr as u8)?;
         self.write_reg(reg::AUX_DEV_ID, bmm150::DEFAULT_ADDR << 1)?;
         self.write_reg(reg::AUX_IF_CONF, 0x80 | 0x40 | 0x0F)?; // manual_en, fcu_write_en, rd_burst
@@ -588,8 +588,9 @@ impl<I2C: I2c> Bmi270<I2C> {
         value: u8,
         delay: &mut D,
     ) -> Result<(), I2C::Error> {
-        self.write_reg(reg::AUX_WR, bmm_reg)?;
         self.write_reg(reg::AUX_WR_DATA, value)?;
+        self.write_reg(reg::AUX_WR, bmm_reg)?;
+        delay(1000);
         Ok(())
     }
 
@@ -601,7 +602,7 @@ impl<I2C: I2c> Bmi270<I2C> {
 
     fn aux_read_buf<D: FnMut(u32)>(&mut self, bmm_reg: u8, buf: &mut [u8], delay: &mut D) -> Result<(), I2C::Error> {
         self.write_reg(reg::AUX_RD, bmm_reg)?;
-        delay(1000); // 1ms (これマジ大事)
+        delay(1000);
         self.read_regs(reg::AUX_X_LSB, buf)
     }
 

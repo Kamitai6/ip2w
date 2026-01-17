@@ -86,7 +86,7 @@ fn main() -> ! {
 
     let i2c0 = I2c::new(peripherals.I2C0, 
         I2cConfig::default()
-            .with_frequency(Rate::from_khz(800))
+            .with_frequency(Rate::from_khz(400))
         ).unwrap()
             .with_sda(peripherals.GPIO45)
             .with_scl(peripherals.GPIO0);
