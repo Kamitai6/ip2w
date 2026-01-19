@@ -7,5 +7,6 @@ edition = "2024"
 libm = {version = "0.2"}
 defmt = "1.0"
 nalgebra = { version = "0.34", default-features = false, features = ["libm"] }
+heapless = "0.9"
 
 [features]

@@ -37,7 +37,7 @@ use embedded_graphics::{
 };
 use embedded_hal_bus::i2c::{RefCellDevice as I2cRefCellDevice};
 use atom::{atom_motion, ina226, bmi270, bmm150, lp5562};
-use control::{fb::{pid, smc}, ff::{gravity, pos_regulator}, util::{imu_ekf, deadzone}};
+use control::{fb::{pid, smc}, ff::{gravity, pos_regulator}, util::{imu_ekf, deadzone, mag_calibration, mag_ets, mag_rls}};
 use mipidsi_async::{
     Builder, 
     models::{GC9107, ST7789}, 
@@ -64,6 +64,7 @@ const DISPLAY_DIV: u32 = 10;
 const TEMP_DIV: u32 = 500;
 const MAG_DIV: u32 = 10;
 const PRINT_DIV: u32 = 100;
+const RLS_DIV: u32 = 500;
 
 static TIMER0: Mutex<RefCell<Option<Timg>>> = Mutex::new(RefCell::new(None));
 pub static TIMER_COUNTER: Mutex<Cell<u32>> = Mutex::new(Cell::new(0));
@@ -191,14 +192,12 @@ fn main() -> ! {
     imu.set_gyr_temp_calibration(calib, 1.0);  // 時定数1秒
 
     use alloc::format;
-    // // 地磁気キャリブレーションループ
-    // let mut mag_calibrator = bmm150::MagCalibrator::new();
+    // // オフライン地磁気キャリブレーション
+    // let mut mag_calibrator = mag_ets::MagOfflineEts::new();
     // loop {
     //     let mag = imu.read_mag().unwrap().unwrap();
-    //     match mag_calibrator.update(&mag) {
-    //         bmm150::UpdateResult::Added | bmm150::UpdateResult::Skipped => {
-    //             let min = mag_calibrator.min();
-    //             let max = mag_calibrator.max();
+    //     match mag_calibrator.update([mag.x, mag.y, mag.z]) {
+    //         mag_ets::UpdateResult::Added | mag_ets::UpdateResult::Skipped => {
     //             let count = mag_calibrator.sample_count();
     //             display.clear(Rgb565::BLACK).unwrap();
     //             let style = MonoTextStyleBuilder::new()
@@ -209,71 +208,72 @@ fn main() -> ! {
     //                 .draw(&mut display).unwrap();
     //             let text = format!("N: {}", count);
     //             Text::new(&text, Point::new(5, 40), style).draw(&mut display).unwrap();
-    //             let text = format!("X:{:.0}~{:.0}", min[0], max[0]);
-    //             Text::new(&text, Point::new(5, 65), style).draw(&mut display).unwrap();
-    //             let text = format!("Y:{:.0}~{:.0}", min[1], max[1]);
-    //             Text::new(&text, Point::new(5, 90), style).draw(&mut display).unwrap();
-    //             let text = format!("Z:{:.0}~{:.0}", min[2], max[2]);
-    //             Text::new(&text, Point::new(5, 115), style).draw(&mut display).unwrap();
     //             display.flush().unwrap();
     //         }
-    //         bmm150::UpdateResult::Full => break,
+    //         mag_ets::UpdateResult::Full => break,
     //     }
     //     if button.is_low() { break; }
     // }
 
-    // // 終了後：オフセット表示（3行に分ける）
-    // let offset = mag_calibrator.hard_iron_offset();
-    // let scale = mag_calibrator.soft_iron_scale();
-    // display.clear(Rgb565::BLACK).unwrap();
-    // let style = MonoTextStyleBuilder::new()
-    //     .font(&FONT_6X10)
-    //     .text_color(Rgb565::GREEN)
-    //     .build();
-    // Text::with_alignment("CALIBRATION DONE", Point::new(64, 12), style, Alignment::Center)
-    //     .draw(&mut display).unwrap();
-    // Text::new("-- OFFSET --", Point::new(5, 30), style).draw(&mut display).unwrap();
-    // let text = format!("X: {:.1}", offset[0]);
-    // Text::new(&text, Point::new(5, 42), style).draw(&mut display).unwrap();
-    // let text = format!("Y: {:.1}", offset[1]);
-    // Text::new(&text, Point::new(5, 54), style).draw(&mut display).unwrap();
-    // let text = format!("Z: {:.1}", offset[2]);
-    // Text::new(&text, Point::new(5, 66), style).draw(&mut display).unwrap();
-    // Text::new("-- SCALE --", Point::new(5, 84), style).draw(&mut display).unwrap();
-    // let text = format!("X: {:.3}", scale[0]);
-    // Text::new(&text, Point::new(5, 96), style).draw(&mut display).unwrap();
-    // let text = format!("Y: {:.3}", scale[1]);
-    // Text::new(&text, Point::new(5, 108), style).draw(&mut display).unwrap();
-    // let text = format!("Z: {:.3}", scale[2]);
-    // Text::new(&text, Point::new(5, 120), style).draw(&mut display).unwrap();
-    // display.flush().unwrap();
+    // // calibrate をエラーハンドリング付きで呼ぶ
+    // match mag_calibrator.calibrate() {
+    //     Ok(mag_calib) => {
+    //         let offset = mag_calib.offset();
+    //         let transform = mag_calib.transform();
+            
+    //         display.clear(Rgb565::BLACK).unwrap();
+    //         let style = MonoTextStyleBuilder::new()
+    //             .font(&FONT_6X10)
+    //             .text_color(Rgb565::GREEN)
+    //             .build();
+    //         Text::new("MAG CALIB RESULT", Point::new(2, 10), style).draw(&mut display).unwrap();
+    //         Text::new("OFFSET:", Point::new(2, 24), style).draw(&mut display).unwrap();
+    //         let text = format!("{:.4},{:.4}", offset[0], offset[1]);
+    //         Text::new(&text, Point::new(2, 34), style).draw(&mut display).unwrap();
+    //         let text = format!("{:.4}", offset[2]);
+    //         Text::new(&text, Point::new(2, 44), style).draw(&mut display).unwrap();
+
+    //         Text::new("TRANSFORM:", Point::new(2, 60), style).draw(&mut display).unwrap();
+    //         let text = format!("{:.6},{:.6}", transform[0][0], transform[0][1]);
+    //         Text::new(&text, Point::new(2, 70), style).draw(&mut display).unwrap();
+    //         let text = format!("{:.6}", transform[0][2]);
+    //         Text::new(&text, Point::new(2, 80), style).draw(&mut display).unwrap();
+    //         let text = format!("{:.6},{:.6}", transform[1][1], transform[1][2]);
+    //         Text::new(&text, Point::new(2, 90), style).draw(&mut display).unwrap();
+    //         let text = format!("{:.6}", transform[2][2]);
+    //         Text::new(&text, Point::new(2, 100), style).draw(&mut display).unwrap();
+    //         display.flush().unwrap();
+    //     }
+    //     Err(e) => {
+    //         // エラー表示
+    //         display.clear(Rgb565::BLACK).unwrap();
+    //         let style = MonoTextStyleBuilder::new()
+    //             .font(&FONT_6X10)
+    //             .text_color(Rgb565::RED)
+    //             .build();
+    //         Text::new("CALIB ERROR:", Point::new(2, 20), style).draw(&mut display).unwrap();
+            
+    //         let err_text = match e {
+    //             mag_ets::CalibrationError::InsufficientSamples => "InsufficientSamples",
+    //             mag_ets::CalibrationError::Step1SingularMatrix => "Step1SingularMatrix",
+    //             mag_ets::CalibrationError::Step1NotPositiveDefinite => "Step1NotPositiveDefinite",
+    //             mag_ets::CalibrationError::Step2NotConverged => "Step2NotConverged",
+    //             mag_ets::CalibrationError::Step2CholeskyFailed => "Step2CholeskyFailed",
+    //         };
+    //         Text::new(err_text, Point::new(2, 40), style).draw(&mut display).unwrap();
+    //         display.flush().unwrap();
+    //     }
+    // }
     // loop {}
-    let mag_calib = bmm150::MagCalibration::new(
-        [65.1, -1099.7, -805.5],   // offset
-        [1.212, 0.752, 1.184],  // scale
+    let mag_calib = mag_calibration::MagCalibration::new(
+        [70.6019, -1074.0603, -766.1834], // offset
+        [[0.028758, 0.002453, -0.001542], // transform
+        [0.0000, 0.012777, -0.019975],
+        [0.0000, 0.0000, 0.002734]],
     );
 
-    // 水平状態で基準磁場を設定
-    // while button.is_high() {}
-    // delay.delay_millis(1000);
-    // let mag_raw = imu.read_mag().unwrap().unwrap();
-    // let mag = mag_calib.apply(&mag_raw);
-    // display.clear(Rgb565::BLACK).unwrap();
-    // let style = MonoTextStyleBuilder::new()
-    //     .font(&FONT_10X20)
-    //     .text_color(Rgb565::GREEN)
-    //     .build();
-    // Text::with_alignment("DONE", Point::new(64, 20), style, Alignment::Center)
-    //     .draw(&mut display).unwrap();
-    // let text = format!("X: {:.1}", mag.x);
-    // Text::new(&text, Point::new(5, 50), style).draw(&mut display).unwrap();
-    // let text = format!("Y: {:.1}", mag.y);
-    // Text::new(&text, Point::new(5, 75), style).draw(&mut display).unwrap();
-    // let text = format!("Z: {:.1}", mag.z);
-    // Text::new(&text, Point::new(5, 100), style).draw(&mut display).unwrap();
-    // display.flush().unwrap();
-    // loop {}
-    let mag_ref = [-2.1, 29.5, 56.4];
+    // オンライン地磁気キャリブレーション
+    let mut rls = mag_rls::MagOnlineRls::new(&mag_calib);
 
     let mut ekf = imu_ekf::ImuEkf::new(
         imu_ekf::EkfConfig {
@@ -281,10 +281,45 @@ fn main() -> ! {
             gyro_noise: 0.05,
             gyro_bias_noise: 0.0005,
             accel_noise: 0.15,
-            mag_noise: 5.0,
+            mag_noise: 1.0,
             ..Default::default()
     });
-    ekf.set_mag_reference_x_up(mag_ref[0], mag_ref[1], mag_ref[2]); // リファレンスはZ-upでとった
+
+    // EKFをまず加速度計で初期化（roll/pitchを確定）
+    for _ in 0..100 {
+        let d = imu.read_imu().unwrap();
+        let (ax, ay, az) = (d.accel.x, d.accel.y, d.accel.z);
+        let (gx, gy, gz) = imu_ekf::degree_to_rad((d.gyro.x, d.gyro.y, d.gyro.z));
+        ekf.update_x_up(
+            ax, ay, az,
+            gx, gy, gz,
+        );
+        delay.delay_millis(1);
+    }
+
+    // 磁場を取得
+    let mag_raw = imu.read_mag().unwrap().unwrap();
+    let mag_cal = mag_calib.apply([mag_raw.x, mag_raw.y, mag_raw.z]);
+
+    // X-up → Z-up 変換
+    let mx = -mag_cal[2];
+    let my = mag_cal[1];
+    let mz = mag_cal[0];
+
+    // EKFから現在のroll/pitchを取得
+    let (roll, pitch, _) = ekf.get_euler();
+
+    // 水平面に射影（運用時と同じ式）
+    let cr = libm::cosf(roll);
+    let sr = libm::sinf(roll);
+    let cp = libm::cosf(pitch);
+    let sp = libm::sinf(pitch);
+
+    let mx_h = mx * cp + my * sr * sp + mz * cr * sp;
+    let my_h = my * cr - mz * sr;
+
+    // 初期Yawオフセット（射影済み）
+    let yaw_offset = libm::atan2f(-my_h, mx_h);
 
     let i2c1 = I2c::new(peripherals.I2C1, 
         I2cConfig::default()
@@ -365,17 +400,18 @@ fn main() -> ! {
                         let (ax, ay, az) = (d.accel.x, d.accel.y, d.accel.z);
                         let (gx, gy, gz) = imu_ekf::degree_to_rad((d.gyro.x, d.gyro.y, d.gyro.z));
                         let mag_raw = d.mag.unwrap();
-                        let mag = mag_calib.apply(&mag_raw);
-                        let norm = libm::sqrtf(mag.x * mag.x + mag.y * mag.y + mag.z * mag.z);
-                        let (mx, my, mz) = (mag.x, mag.y, mag.z);
+                        if counter % RLS_DIV == 0 {
+                            rls.update([mag_raw.x, mag_raw.y, mag_raw.z]);
+                        }
+                        let mag_cal = rls.apply([mag_raw.x, mag_raw.y, mag_raw.z]);
                         let state = ekf.update_x_up(ax, ay, az, gx, gy, gz);
                         
                         if counter % MAG_DIV == 0 {
-                            ekf.update_mag_x_up(mag.x, mag.y, mag.z);
+                            ekf.update_mag_yaw_x_up(mag_cal[0], mag_cal[1], mag_cal[2], yaw_offset);
                         }
                         if counter % PRINT_DIV == 0 {
                             info!("mag_raw=({},{},{})", mag_raw.x, mag_raw.y, mag_raw.z);
-                            info!("mag_cal=({},{},{})", mag.x, mag.y, mag.z);
+                            // info!("mag_cal=({},{},{})", mag.x, mag.y, mag.z);
                         //     info!("a={}, {}, {}", ax, ay, az);
                         //     info!("g={}, {}, {}", gx, gy, gz);
                             // info!("mag=({:01},{:01},{:01}) norm={:01}", mx, my, mz, norm);

@@ -7,6 +7,7 @@ edition = "2024"
 embedded-hal = "1.0"
 heapless = "0.9"
 libm = {version = "0.2"}
+nalgebra = { version = "0.34", default-features = false, features = ["libm"] }
 defmt = "1.0"
 
 [features]

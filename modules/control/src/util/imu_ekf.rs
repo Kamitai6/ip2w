@@ -143,8 +143,6 @@ pub struct ImuEkf {
     r_accel: f32,
     /// 磁力計観測ノイズ
     r_mag: f32,
-    /// 基準磁場ベクトル（NED座標系）
-    mag_ref: Option<Vector3<f32>>,
     config: EkfConfig,
     last_gyro: [f32; 3],
     initialized: bool,
@@ -182,42 +180,12 @@ impl ImuEkf {
             q_mat,
             r_accel,
             r_mag,
-            mag_ref: None,
             config,
             last_gyro: [0.0; 3],
             initialized: false,
             continuous: [ContinuousAngle::default(); 3],
             yaw_offset: 0.0,
         }
-    }
-
-    /// 基準磁場ベクトルを設定（ハードアイアン補正済みの値）
-    ///
-    /// デバイスが水平の状態で、補正済み磁力計データを渡す。
-    /// 内部でノルム正規化される。
-    pub fn set_mag_reference(&mut self, mx: f32, my: f32, mz: f32) {
-        let norm = sqrtf(mx * mx + my * my + mz * mz);
-        if norm > EPSILON {
-            self.mag_ref = Some(Vector3::new(mx / norm, my / norm, mz / norm));
-        }
-    }
-
-    /// X軸が上向きの座標系で基準磁場を設定
-    /// 
-    /// X_up状態で、キャリブレーション済み磁力計データを渡す
-    pub fn set_mag_reference_x_up(&mut self, mx: f32, my: f32, mz: f32) {
-        // update_mag_x_up と同じ変換を適用
-        self.set_mag_reference(-mz, my, mx)
-    }
-
-    /// 基準磁場ベクトルをクリア
-    pub fn clear_mag_reference(&mut self) {
-        self.mag_ref = None;
-    }
-
-    /// 基準磁場が設定されているか
-    pub fn has_mag_reference(&self) -> bool {
-        self.mag_ref.is_some()
     }
 
     pub fn update(
@@ -269,132 +237,91 @@ impl ImuEkf {
         self.build_current_state(accel_valid)
     }
 
-    /// 磁力計による更新（2段階目）
-    ///
-    /// ハードアイアン補正済みの磁力計データを渡す。
-    /// set_mag_reference()で基準磁場を設定していない場合は何もしない。
-    pub fn update_mag(&mut self, mx: f32, my: f32, mz: f32) {
-        let mag_ref = match self.mag_ref {
-            Some(ref m) => *m,
-            None => return,
-        };
+    /// Yaw角のみを磁場から観測（X-up座標系用）
+    pub fn update_mag_yaw_x_up(&mut self, mx: f32, my: f32, mz: f32, yaw_offset: f32) {
+        // X-up → Z-up 変換
+        self.update_mag_yaw(-mz, my, mx, yaw_offset)
+    }
 
-        // 観測値を正規化
-        let mag_norm = sqrtf(mx * mx + my * my + mz * mz);
-        if mag_norm < EPSILON {
+    /// Yaw角のみを磁場から観測（内部Z-up座標系）
+    pub fn update_mag_yaw(&mut self, mx: f32, my: f32, mz: f32, yaw_offset: f32) {
+        // 現在の姿勢
+        let (roll, pitch, yaw_predicted) = self.get_euler();
+        
+        // 磁場を水平面に射影（Z-up座標系）
+        let cr = libm::cosf(roll);
+        let sr = libm::sinf(roll);
+        let cp = libm::cosf(pitch);
+        let sp = libm::sinf(pitch);
+        
+        let mx_h = mx * cp + my * sr * sp + mz * cr * sp;
+        let my_h = my * cr - mz * sr;
+        
+        // 測定Yaw
+        let yaw_measured = atan2f(-my_h, mx_h) - yaw_offset;
+        
+        // イノベーション（角度正規化）
+        let mut y = yaw_measured - yaw_predicted;
+        while y > PI { y -= 2.0 * PI; }
+        while y < -PI { y += 2.0 * PI; }
+        
+        // 1次元カルマン更新
+        let h = self.compute_yaw_jacobian();
+        
+        // S = H * P * H^T + R (スカラー)
+        let hp = h * self.p;
+        let s = (hp * h.transpose())[(0, 0)] + self.r_mag;
+        
+        if s.abs() < EPSILON {
             return;
         }
-        let mx = mx / mag_norm;
-        let my = my / mag_norm;
-        let mz = mz / mag_norm;
-
-        let q0 = self.x[0];
-        let q1 = self.x[1];
-        let q2 = self.x[2];
-        let q3 = self.x[3];
-
-        // 回転行列 R(q) のボディからワールドへの変換
-        // 予測観測 h = R(q)^T * m_ref （ワールドからボディへ）
-        let q = UnitQuaternion::from_quaternion(Quaternion::new(q0, q1, q2, q3));
-        let h_vec = q.inverse_transform_vector(&mag_ref);
-
-        // イノベーション
-        let y = Vector3::new(mx - h_vec.x, my - h_vec.y, mz - h_vec.z);
-
-        // 観測ヤコビアン H (3x7)
-        // h = R(q)^T * m_ref の q に対する偏微分
-        let h = self.compute_mag_jacobian(&mag_ref);
-
-        // 観測ノイズ R
-        let r = Matrix3::from_diagonal(&Vector3::new(self.r_mag, self.r_mag, self.r_mag));
-
-        // イノベーション共分散 S = H * P * H^T + R
-        let s = h * self.p * h.transpose() + r;
-
-        // カルマンゲイン K = P * H^T * S^-1
-        let s_inv = s
-            .try_inverse()
-            .unwrap_or_else(|| Matrix3::identity() * EPSILON);
-        let k: KalmanGain3 = self.p * h.transpose() * s_inv;
-
+        
+        // K = P * H^T / S (7x1)
+        let k = self.p * h.transpose() / s;
+        
         // 状態更新
-        let dx = k * y;
-        self.x += dx;
-
-        // Joseph形式の共分散更新
+        self.x += k * y;
+        
+        // 共分散更新（Joseph形式の簡略版）
         let i_kh = CovMatrix::identity() - k * h;
-        self.p = i_kh * self.p * i_kh.transpose() + k * r * k.transpose();
-
+        self.p = i_kh * self.p * i_kh.transpose() + k * self.r_mag * k.transpose();
+        
         self.normalize_quaternion();
         self.ensure_positive_definite();
     }
 
-    /// 磁力計観測のヤコビアン計算
-    ///
-    /// h = R(q)^T * m_ref の q に対する偏微分
-    fn compute_mag_jacobian(&self, m_ref: &Vector3<f32>) -> ObsMatrix3x7 {
+    /// Yawのクォータニオンに対するヤコビアン (1x7)
+    fn compute_yaw_jacobian(&self) -> SMatrix<f32, 1, 7> {
         let q0 = self.x[0];
         let q1 = self.x[1];
         let q2 = self.x[2];
         let q3 = self.x[3];
-
-        let mx = m_ref.x;
-        let my = m_ref.y;
-        let mz = m_ref.z;
-
-        // R(q)^T の各成分:
-        // R^T[0,0] = 1 - 2(q2² + q3²)
-        // R^T[0,1] = 2(q1q2 - q0q3)
-        // R^T[0,2] = 2(q1q3 + q0q2)
-        // R^T[1,0] = 2(q1q2 + q0q3)
-        // R^T[1,1] = 1 - 2(q1² + q3²)
-        // R^T[1,2] = 2(q2q3 - q0q1)
-        // R^T[2,0] = 2(q1q3 - q0q2)
-        // R^T[2,1] = 2(q2q3 + q0q1)
-        // R^T[2,2] = 1 - 2(q1² + q2²)
-
-        // h = R^T * m なので:
-        // hx = (1-2q2²-2q3²)mx + 2(q1q2-q0q3)my + 2(q1q3+q0q2)mz
-        // hy = 2(q1q2+q0q3)mx + (1-2q1²-2q3²)my + 2(q2q3-q0q1)mz
-        // hz = 2(q1q3-q0q2)mx + 2(q2q3+q0q1)my + (1-2q1²-2q2²)mz
-
-        // ∂hx/∂q0 = -2q3*my + 2q2*mz
-        // ∂hx/∂q1 = 2q2*my + 2q3*mz
-        // ∂hx/∂q2 = -4q2*mx + 2q1*my + 2q0*mz
-        // ∂hx/∂q3 = -4q3*mx - 2q0*my + 2q1*mz
-
-        // ∂hy/∂q0 = 2q3*mx - 2q1*mz
-        // ∂hy/∂q1 = 2q2*mx - 4q1*my - 2q0*mz
-        // ∂hy/∂q2 = 2q1*mx + 2q3*mz
-        // ∂hy/∂q3 = 2q0*mx - 4q3*my + 2q2*mz
-
-        // ∂hz/∂q0 = -2q2*mx + 2q1*my
-        // ∂hz/∂q1 = 2q3*mx + 2q0*my - 4q1*mz
-        // ∂hz/∂q2 = -2q0*mx + 2q3*my - 4q2*mz
-        // ∂hz/∂q3 = 2q1*mx + 2q2*my
-
-        let mut h = ObsMatrix3x7::zeros();
-
-        // ∂hx/∂q
-        h[(0, 0)] = -2.0 * q3 * my + 2.0 * q2 * mz;
-        h[(0, 1)] = 2.0 * q2 * my + 2.0 * q3 * mz;
-        h[(0, 2)] = -4.0 * q2 * mx + 2.0 * q1 * my + 2.0 * q0 * mz;
-        h[(0, 3)] = -4.0 * q3 * mx - 2.0 * q0 * my + 2.0 * q1 * mz;
-
-        // ∂hy/∂q
-        h[(1, 0)] = 2.0 * q3 * mx - 2.0 * q1 * mz;
-        h[(1, 1)] = 2.0 * q2 * mx - 4.0 * q1 * my - 2.0 * q0 * mz;
-        h[(1, 2)] = 2.0 * q1 * mx + 2.0 * q3 * mz;
-        h[(1, 3)] = 2.0 * q0 * mx - 4.0 * q3 * my + 2.0 * q2 * mz;
-
-        // ∂hz/∂q
-        h[(2, 0)] = -2.0 * q2 * mx + 2.0 * q1 * my;
-        h[(2, 1)] = 2.0 * q3 * mx + 2.0 * q0 * my - 4.0 * q1 * mz;
-        h[(2, 2)] = -2.0 * q0 * mx + 2.0 * q3 * my - 4.0 * q2 * mz;
-        h[(2, 3)] = 2.0 * q1 * mx + 2.0 * q2 * my;
-
-        // バイアスに対する偏微分は0（列4,5,6は0のまま）
-
+        
+        // yaw = atan2(2(q0*q3 + q1*q2), 1 - 2(q2² + q3²))
+        // ∂yaw/∂q の計算
+        
+        let num = 2.0 * (q0 * q3 + q1 * q2);
+        let den = 1.0 - 2.0 * (q2 * q2 + q3 * q3);
+        let den_sq = den * den + num * num;  // atan2の分母
+        
+        if den_sq < EPSILON {
+            return SMatrix::<f32, 1, 7>::zeros();
+        }
+        
+        let inv_den_sq = 1.0 / den_sq;
+        
+        // ∂yaw/∂q0 = 2*q3*den / den_sq
+        // ∂yaw/∂q1 = 2*q2*den / den_sq
+        // ∂yaw/∂q2 = (2*q1*den + 4*q2*num) / den_sq
+        // ∂yaw/∂q3 = (2*q0*den + 4*q3*num) / den_sq
+        
+        let mut h = SMatrix::<f32, 1, 7>::zeros();
+        h[(0, 0)] = 2.0 * q3 * den * inv_den_sq;
+        h[(0, 1)] = 2.0 * q2 * den * inv_den_sq;
+        h[(0, 2)] = (2.0 * q1 * den + 4.0 * q2 * num) * inv_den_sq;
+        h[(0, 3)] = (2.0 * q0 * den + 4.0 * q3 * num) * inv_den_sq;
+        // バイアス部分は0
+        
         h
     }
 
@@ -613,11 +540,6 @@ impl ImuEkf {
         self.update(-az, ay, ax, -gz, gy, gx)
     }
 
-    /// X軸が上向きの座標系で磁力計更新
-    pub fn update_mag_x_up(&mut self, mx: f32, my: f32, mz: f32) {
-        self.update_mag(-mz, my, mx)
-    }
-
     #[inline(always)]
     pub fn get_quaternion(&self) -> UnitQuaternion<f32> {
         let q = Quaternion::new(self.x[0], self.x[1], self.x[2], self.x[3]);
@@ -644,7 +566,6 @@ impl ImuEkf {
     pub fn reset(&mut self) {
         self.x = StateVector::from_row_slice(&[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
         self.initialized = false;
-        self.mag_ref = None;
         self.yaw_offset = 0.0;
 
         let pq = self.config.initial_quat_variance;
