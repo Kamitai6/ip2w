@@ -11,6 +11,7 @@ use core::{cell::{RefCell, Cell}, f32::consts::PI};
 use alloc::borrow::ToOwned;
 use critical_section::{Mutex, with};
 use defmt::info;
+use libm::sqrtf;
 use {esp_backtrace as _, esp_println as _};
 
 use esp_hal::{
@@ -69,6 +70,50 @@ const RLS_DIV: u32 = 500;
 static TIMER0: Mutex<RefCell<Option<Timg>>> = Mutex::new(RefCell::new(None));
 pub static TIMER_COUNTER: Mutex<Cell<u32>> = Mutex::new(Cell::new(0));
 
+
+#[derive(Clone, Copy)]
+pub struct RunningStats {
+    n: u32,
+    mean: f32,
+    m2: f32,
+    min: f32,
+    max: f32,
+}
+
+impl RunningStats {
+    pub fn new() -> Self {
+        Self {
+            n: 0,
+            mean: 0.0,
+            m2: 0.0,
+            min: f32::INFINITY,
+            max: -f32::INFINITY,
+        }
+    }
+
+    pub fn push(&mut self, x: f32) {
+        self.n += 1;
+
+        if x < self.min { self.min = x; }
+        if x > self.max { self.max = x; }
+
+        let n = self.n as f32;
+        let delta = x - self.mean;
+        self.mean += delta / n;
+        let delta2 = x - self.mean;
+        self.m2 += delta * delta2;
+    }
+
+    pub fn mean(&self) -> f32 { self.mean }
+    pub fn std(&self) -> f32 {
+        if self.n < 2 { return 0.0; }
+        sqrtf(self.m2 / ((self.n - 1) as f32))
+    }
+
+    pub fn min(&self) -> f32 { self.min }
+    pub fn max(&self) -> f32 { self.max }
+    pub fn n(&self) -> u32 { self.n }
+}
 
 #[allow(
     clippy::large_stack_frames,
@@ -272,6 +317,47 @@ fn main() -> ! {
         [0.0000, 0.0000, 0.002734]],
     );
 
+    let mut test = RunningStats::new();
+
+    // check
+    for i in 0..1000 {
+        let mag_raw = imu.read_mag().unwrap().unwrap();
+        let mag_cal = mag_calib.apply([mag_raw.x, mag_raw.y, mag_raw.z]); //固定
+        test.push(sqrtf(mag_cal[0]*mag_cal[0] + mag_cal[1]*mag_cal[1] + mag_cal[2]*mag_cal[2]));
+        
+        display.clear(Rgb565::BLACK).unwrap();
+        let style = MonoTextStyleBuilder::new()
+            .font(&FONT_10X20)
+            .text_color(Rgb565::WHITE)
+            .build();
+        Text::with_alignment("MAG Check", Point::new(64, 15), style, Alignment::Center)
+            .draw(&mut display).unwrap();
+        let text = format!("N: {}", i);
+        Text::new(&text, Point::new(5, 40), style).draw(&mut display).unwrap();
+        display.flush().unwrap();
+
+        delay.delay_millis(100);
+    }
+
+    display.clear(Rgb565::BLACK).unwrap();
+    let style = MonoTextStyleBuilder::new()
+        .font(&FONT_6X10)
+        .text_color(Rgb565::GREEN)
+        .build();
+    let text = format!("n: {:.6}", test.n());
+    Text::new(&text, Point::new(2, 34), style).draw(&mut display).unwrap();
+    let text = format!("mean{:.6}", test.mean());
+    Text::new(&text, Point::new(2, 44), style).draw(&mut display).unwrap();
+    let text = format!("std{:.6}", test.std());
+    Text::new(&text, Point::new(2, 54), style).draw(&mut display).unwrap();
+    let text = format!("min{:.6}", test.min());
+    Text::new(&text, Point::new(2, 64), style).draw(&mut display).unwrap();
+    let text = format!("max{:.6}", test.max());
+    Text::new(&text, Point::new(2, 74), style).draw(&mut display).unwrap();
+    display.flush().unwrap();
+
+    loop{}
+
     // オンライン地磁気キャリブレーション
     let mut rls = mag_rls::MagOnlineRls::new(&mag_calib);
 
@@ -382,6 +468,8 @@ fn main() -> ! {
     let mut m2_pwm = 0;
     let mut target_angle = 0.0;
     let mut counter = 0;
+    use heapless::Vec as HVec;
+    let mut buf: HVec<[f32; 3], 1000> = HVec::new();
 
     info!("Start!");
     loop {
@@ -403,18 +491,16 @@ fn main() -> ! {
                         if counter % RLS_DIV == 0 {
                             rls.update([mag_raw.x, mag_raw.y, mag_raw.z]);
                         }
-                        let mag_cal = rls.apply([mag_raw.x, mag_raw.y, mag_raw.z]);
+                        let mag = rls.apply([mag_raw.x, mag_raw.y, mag_raw.z]); //動的
                         let state = ekf.update_x_up(ax, ay, az, gx, gy, gz);
                         
                         if counter % MAG_DIV == 0 {
-                            ekf.update_mag_yaw_x_up(mag_cal[0], mag_cal[1], mag_cal[2], yaw_offset);
+                            ekf.update_mag_yaw_x_up(mag[0], mag[1], mag[2], yaw_offset);
                         }
                         if counter % PRINT_DIV == 0 {
-                            info!("mag_raw=({},{},{})", mag_raw.x, mag_raw.y, mag_raw.z);
-                            // info!("mag_cal=({},{},{})", mag.x, mag.y, mag.z);
-                        //     info!("a={}, {}, {}", ax, ay, az);
-                        //     info!("g={}, {}, {}", gx, gy, gz);
-                            // info!("mag=({:01},{:01},{:01}) norm={:01}", mx, my, mz, norm);
+                            // info!("a={}, {}, {}", ax, ay, az);
+                            // info!("g={}, {}, {}", gx, gy, gz);
+                            // info!("m=({},{},{})", mag[0], mag[1], mag[2]);
                             // info!("r={}, {}, {}", state.roll, state.pitch, state.yaw);
                         }
                         counter += 1;

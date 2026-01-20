@@ -245,8 +245,15 @@ impl ImuEkf {
 
     /// Yaw角のみを磁場から観測（内部Z-up座標系）
     pub fn update_mag_yaw(&mut self, mx: f32, my: f32, mz: f32, yaw_offset: f32) {
+        let q0 = self.x[0];
+        let q1 = self.x[1];
+        let q2 = self.x[2];
+        let q3 = self.x[3];
+        let num = 2.0 * (q0*q3 + q1*q2);
+        let den = 1.0 - 2.0 * (q2*q2 + q3*q3);
+        let yaw_predicted = atan2f(num, den);
         // 現在の姿勢
-        let (roll, pitch, yaw_predicted) = self.get_euler();
+        let (roll, pitch, _) = self.get_euler();
         
         // 磁場を水平面に射影（Z-up座標系）
         let cr = libm::cosf(roll);
@@ -260,6 +267,19 @@ impl ImuEkf {
         // 測定Yaw
         let yaw_measured = atan2f(-my_h, mx_h) - yaw_offset;
         
+        // defmt::info!("measured{}, predicted{}", yaw_measured, yaw_predicted);
+        defmt::info!("roll{}, pitch{}", roll, pitch);
+        defmt::info!("mx={}, my={}, mz={}, m_norm={}, h_simple={}", mx, my, mz, sqrtf(mx*mx+my*my+mz*mz), sqrtf(mx*mx+my*my));
+
+        let yaw_raw = atan2f(-my_h, mx_h);
+        let yaw_raw_simple = atan2f(-my, mx);   // tilt補正なし（水平仮定）
+        defmt::info!("yaw_simple={}, yaw_raw={}", yaw_raw_simple, yaw_raw);
+        // defmt::info!(
+        //     "yaw_raw={}, yaw_offset={}, measured={}",
+        //     yaw_raw, yaw_offset, yaw_raw - yaw_offset
+        // );
+        defmt::info!("mx_h={}, my_h={}, h={}", mx_h, my_h, sqrtf(mx_h * mx_h + my_h * my_h));
+
         // イノベーション（角度正規化）
         let mut y = yaw_measured - yaw_predicted;
         while y > PI { y -= 2.0 * PI; }
