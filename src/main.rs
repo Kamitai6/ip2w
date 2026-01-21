@@ -248,12 +248,41 @@ fn main() -> ! {
         47.609695, (-5, -13, -13));
     imu.set_gyr_temp_calibration(calib, 1.0);  // 時定数1秒
 
+    // 空読み
+    let _ = imu.read_mag().unwrap().unwrap();
+    delay.delay_millis(100);
+
     use alloc::format;
+
     // // オフライン地磁気キャリブレーション
     // let mut mag_calibrator = mag_ets::MagOfflineEts::new();
+    // let mut prev_ok_raw = [0.0f32; 3];
+    // let mut has_prev_ok = false;
+    // let mut huge_jump_count: u32 = 0;
+    // const JUMP_TH: f32 = 500.0;
+
     // loop {
     //     let mag = imu.read_mag().unwrap().unwrap();
-    //     match mag_calibrator.update([mag.x, mag.y, mag.z]) {
+    //     let raw = [mag.x, mag.y, mag.z];
+
+    //     // ===== ジャンプ除去（異常点だけ落とす）=====
+    //     if has_prev_ok {
+    //         let dx = raw[0] - prev_ok_raw[0];
+    //         let dy = raw[1] - prev_ok_raw[1];
+    //         let dz = raw[2] - prev_ok_raw[2];
+    //         let jump = libm::sqrtf(dx*dx + dy*dy + dz*dz);
+
+    //         if jump > JUMP_TH {
+    //             huge_jump_count += 1;
+    //             // prev_ok_raw = raw;
+    //             // has_prev_ok = true;
+    //             continue;
+    //         }
+    //     }
+    //     prev_ok_raw = raw;
+    //     has_prev_ok = true;
+
+    //     match mag_calibrator.update(raw) {
     //         mag_ets::UpdateResult::Added | mag_ets::UpdateResult::Skipped => {
     //             let count = mag_calibrator.sample_count();
     //             display.clear(Rgb565::BLACK).unwrap();
@@ -323,10 +352,10 @@ fn main() -> ! {
     // }
     // loop {}
     let mag_calib = mag_calibration::MagCalibration::new(
-        [70.6019, -1074.0603, -766.1834], // offset
-        [[0.028758, 0.002453, -0.001542], // transform
-        [0.0000, 0.012777, -0.019975],
-        [0.0000, 0.0000, 0.002734]],
+        [80.2899, -1077.7451, -767.7703], // offset
+        [[0.025567, 0.000170, -0.001187], // transform
+        [0.0000, 0.014415, 0.001860],
+        [0.0000, 0.0000, 0.023254]],
     );
 
     let mut test = RunningStats::new();
