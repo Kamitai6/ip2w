@@ -36,14 +36,14 @@ impl Default for ContinuousAngle {
 impl ContinuousAngle {
     fn update(&mut self, angle: f32) -> f32 {
         if self.turns.abs() < EPSILON {
-            self.prev = angle;
+            self.turns -= angle;
         }
         if (angle * self.prev) < 0.0 {
             let diff = angle - self.prev;
             if diff < -PI {
-                self.turns += PI;
+                self.turns += PI*2.0;
             } else if diff > PI {
-                self.turns -= PI;
+                self.turns -= PI*2.0;
             }
         }
         self.prev = angle;
@@ -238,22 +238,15 @@ impl ImuEkf {
     }
 
     /// Yaw角のみを磁場から観測（X-up座標系用）
-    pub fn update_mag_yaw_x_up(&mut self, mx: f32, my: f32, mz: f32, yaw_offset: f32) {
+    pub fn update_mag_yaw_x_up(&mut self, mx: f32, my: f32, mz: f32) {
         // X-up → Z-up 変換
-        self.update_mag_yaw(-mz, my, mx, yaw_offset)
+        self.update_mag_yaw(-mz, my, mx)
     }
 
     /// Yaw角のみを磁場から観測（内部Z-up座標系）
-    pub fn update_mag_yaw(&mut self, mx: f32, my: f32, mz: f32, yaw_offset: f32) {
-        let q0 = self.x[0];
-        let q1 = self.x[1];
-        let q2 = self.x[2];
-        let q3 = self.x[3];
-        let num = 2.0 * (q0*q3 + q1*q2);
-        let den = 1.0 - 2.0 * (q2*q2 + q3*q3);
-        let yaw_predicted = atan2f(num, den);
+    pub fn update_mag_yaw(&mut self, mx: f32, my: f32, mz: f32) {
         // 現在の姿勢
-        let (roll, pitch, _) = self.get_euler();
+        let (roll, pitch, yaw_predicted) = self.get_euler();
         
         // 磁場を水平面に射影（Z-up座標系）
         let cr = libm::cosf(roll);
@@ -265,46 +258,54 @@ impl ImuEkf {
         let my_h = my * cr - mz * sr;
         
         // 測定Yaw
-        let yaw_measured = atan2f(-my_h, mx_h) - yaw_offset;
-        
-        // defmt::info!("measured{}, predicted{}", yaw_measured, yaw_predicted);
-        defmt::info!("roll{}, pitch{}", roll, pitch);
-        defmt::info!("mx={}, my={}, mz={}, m_norm={}, h_simple={}", mx, my, mz, sqrtf(mx*mx+my*my+mz*mz), sqrtf(mx*mx+my*my));
-
-        let yaw_raw = atan2f(-my_h, mx_h);
-        let yaw_raw_simple = atan2f(-my, mx);   // tilt補正なし（水平仮定）
-        defmt::info!("yaw_simple={}, yaw_raw={}", yaw_raw_simple, yaw_raw);
-        // defmt::info!(
-        //     "yaw_raw={}, yaw_offset={}, measured={}",
-        //     yaw_raw, yaw_offset, yaw_raw - yaw_offset
-        // );
-        defmt::info!("mx_h={}, my_h={}, h={}", mx_h, my_h, sqrtf(mx_h * mx_h + my_h * my_h));
+        let yaw_measured = atan2f(-my_h, mx_h);
 
         // イノベーション（角度正規化）
         let mut y = yaw_measured - yaw_predicted;
         while y > PI { y -= 2.0 * PI; }
         while y < -PI { y += 2.0 * PI; }
         
+        let k_y = 80.0;
+        let r_eff = self.r_mag * (1.0 + k_y * y * y);
+
         // 1次元カルマン更新
         let h = self.compute_yaw_jacobian();
         
         // S = H * P * H^T + R (スカラー)
         let hp = h * self.p;
-        let s = (hp * h.transpose())[(0, 0)] + self.r_mag;
+        // let s = (hp * h.transpose())[(0, 0)] + self.r_mag;
+        let s = (hp * h.transpose())[(0, 0)] + r_eff;
         
         if s.abs() < EPSILON {
             return;
         }
         
         // K = P * H^T / S (7x1)
-        let k = self.p * h.transpose() / s;
+        let mut k = self.p * h.transpose() / s;
         
+        // ===== biasの扱い =====
+        // bias_x, bias_y は磁気Yawから更新しない（固定）
+        k[(4, 0)] = 0.0;
+        k[(5, 0)] = 0.0;
+
+        // bias_z だけは更新させるが、1回の更新量をクランプして暴走を防ぐ
+        const BZ_STEP_MAX: f32 = 0.002; // [rad/s] 1回の磁気更新で動かしてよい上限
+        if y.abs() > 1.0e-6 {
+            let dz = k[(6, 0)] * y; // 今回のbias_z更新量
+            if dz.abs() > BZ_STEP_MAX {
+                k[(6, 0)] *= BZ_STEP_MAX / dz.abs(); // kを縮めて dz を上限に合わせる
+            }
+        } else {
+            k[(6, 0)] = 0.0;
+        }
+
         // 状態更新
         self.x += k * y;
         
         // 共分散更新（Joseph形式の簡略版）
         let i_kh = CovMatrix::identity() - k * h;
-        self.p = i_kh * self.p * i_kh.transpose() + k * self.r_mag * k.transpose();
+        // self.p = i_kh * self.p * i_kh.transpose() + k * self.r_mag * k.transpose();
+        self.p = i_kh * self.p * i_kh.transpose() + k * r_eff * k.transpose();
         
         self.normalize_quaternion();
         self.ensure_positive_definite();

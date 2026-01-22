@@ -249,8 +249,10 @@ fn main() -> ! {
     imu.set_gyr_temp_calibration(calib, 1.0);  // 時定数1秒
 
     // 空読み
-    let _ = imu.read_mag().unwrap().unwrap();
-    delay.delay_millis(100);
+    for _ in 0..3 {
+        let _ = imu.read_mag().unwrap().unwrap();
+        delay.delay_millis(50);
+    }
 
     use alloc::format;
 
@@ -274,8 +276,8 @@ fn main() -> ! {
 
     //         if jump > JUMP_TH {
     //             huge_jump_count += 1;
-    //             // prev_ok_raw = raw;
-    //             // has_prev_ok = true;
+    //             prev_ok_raw = raw;
+    //             has_prev_ok = true;
     //             continue;
     //         }
     //     }
@@ -358,336 +360,6 @@ fn main() -> ! {
         [0.0000, 0.0000, 0.023254]],
     );
 
-    let mut test = RunningStats::new();
-let mut extremes = Extremes::<4>::new(); // K=4（min4件/max4件）
-
-let mut small_cluster_count: u32 = 0;
-let mut huge_jump_count: u32 = 0;
-let mut prev_raw = [0.0f32; 3];
-let mut has_prev = false;
-
-// rの分布カウント
-let mut inlier_count: u32 = 0;  // 0.8..1.2
-let mut outlier_count: u32 = 0; // それ以外
-let mut low_count: u32 = 0;     // r < 0.5
-let mut high_count: u32 = 0;    // r > 1.5
-
-// d_norm = ||raw - offset|| の統計
-let offset = mag_calib.offset();
-let mut d_stats = RunningStats::new();
-let mut d_small_40: u32 = 0;
-
-// 追加：rの極端値と d_norm<40 の対応カウント
-let mut low_dsmall40: u32 = 0;  // r<0.5 かつ d_norm<40
-let mut low_dlarge40: u32 = 0;  // r<0.5 かつ d_norm>=40
-let mut high_dsmall40: u32 = 0; // r>1.5 かつ d_norm<40
-let mut high_dlarge40: u32 = 0; // r>1.5 かつ d_norm>=40
-
-// ===== check（1000点）=====
-for i in 0..1000 {
-    let mag_raw = imu.read_mag().unwrap().unwrap();
-
-    // applyの入力は「あなたが使っている座標 & 単位のまま」
-    let raw = [mag_raw.x, mag_raw.y, mag_raw.z];
-    let cal = mag_calib.apply(raw);
-
-    let r = sqrtf(cal[0] * cal[0] + cal[1] * cal[1] + cal[2] * cal[2]);
-
-    test.push(r);
-    extremes.push(Sample { r, raw, cal });
-
-    // クラスタ判定：rawが小さい（MAX[0]側の群）
-    if raw[0].abs() < 200.0 && raw[1].abs() < 200.0 && raw[2].abs() < 200.0 {
-        small_cluster_count += 1;
-    }
-
-    // 連続性チェック：急激に飛んだ回数
-    if has_prev {
-        let dx = raw[0] - prev_raw[0];
-        let dy = raw[1] - prev_raw[1];
-        let dz = raw[2] - prev_raw[2];
-        let jump = sqrtf(dx * dx + dy * dy + dz * dz);
-        if jump > 500.0 {
-            huge_jump_count += 1;
-        }
-    }
-    prev_raw = raw;
-    has_prev = true;
-
-    // rの分布カウント
-    if r >= 0.8 && r <= 1.2 {
-        inlier_count += 1;
-    } else {
-        outlier_count += 1;
-    }
-    if r < 0.5 {
-        low_count += 1;
-    }
-    if r > 1.5 {
-        high_count += 1;
-    }
-
-    // d_norm = ||raw - offset|| の統計
-    let dx = raw[0] - offset[0];
-    let dy = raw[1] - offset[1];
-    let dz = raw[2] - offset[2];
-    let d_norm = sqrtf(dx * dx + dy * dy + dz * dz);
-    d_stats.push(d_norm);
-
-    let d_is_small40 = d_norm < 40.0;
-    if d_is_small40 {
-        d_small_40 += 1;
-    }
-
-    // 追加：r極端値 × d_norm<40 の対応
-    if r < 0.5 {
-        if d_is_small40 {
-            low_dsmall40 += 1;
-        } else {
-            low_dlarge40 += 1;
-        }
-    }
-    if r > 1.5 {
-        if d_is_small40 {
-            high_dsmall40 += 1;
-        } else {
-            high_dlarge40 += 1;
-        }
-    }
-
-    // 進捗表示
-    display.clear(Rgb565::BLACK).unwrap();
-    let style = MonoTextStyleBuilder::new()
-        .font(&FONT_10X20)
-        .text_color(Rgb565::WHITE)
-        .build();
-    Text::with_alignment("MAG Check", Point::new(64, 15), style, Alignment::Center)
-        .draw(&mut display)
-        .unwrap();
-    let text = format!("N: {}", i);
-    Text::new(&text, Point::new(5, 40), style)
-        .draw(&mut display)
-        .unwrap();
-    display.flush().unwrap();
-
-    delay.delay_millis(50);
-}
-
-// ===== ここからページング表示 =====
-let mut page: u8 = 0;
-let total_pages: u8 = 1 + 4 + 4; // summary + min4 + max4
-let mut last_btn = button.is_low();
-
-fn draw_page(
-    display: &mut mipidsi_async::Display<'_, DmaSpiInterface<'_>, GC9107>,
-    page: u8,
-    total_pages: u8,
-    test: &RunningStats,
-    extremes: &Extremes<4>,
-    small_cluster_count: u32,
-    huge_jump_count: u32,
-    inlier_count: u32,
-    outlier_count: u32,
-    low_count: u32,
-    high_count: u32,
-    d_stats: &RunningStats,
-    d_small_40: u32,
-    low_dsmall40: u32,
-    low_dlarge40: u32,
-    high_dsmall40: u32,
-    high_dlarge40: u32,
-    offset: [f32; 3],          // ← 追加
-) {
-    use alloc::format;
-
-    display.clear(Rgb565::BLACK).unwrap();
-
-    let title_style = MonoTextStyleBuilder::new()
-        .font(&FONT_10X20)
-        .text_color(Rgb565::WHITE)
-        .build();
-    let text_style = MonoTextStyleBuilder::new()
-        .font(&FONT_6X10)
-        .text_color(Rgb565::GREEN)
-        .build();
-
-    // 上部タイトル
-    let title = format!("MAG STAT {}/{}", page + 1, total_pages);
-    Text::with_alignment(&title, Point::new(64, 15), title_style, Alignment::Center)
-        .draw(display)
-        .unwrap();
-
-    // summary
-    if page == 0 {
-        let t1 = format!("n: {}", test.n());
-        let t2 = format!("mean: {:.6}", test.mean());
-        let t3 = format!("std : {:.6}", test.std());
-        let t4 = format!("min : {:.6}", test.min());
-        let t5 = format!("max : {:.6}", test.max());
-
-        // LCD 128幅に入るように圧縮（あなたの現在の構成）
-        let t6 = format!(
-            "s{} j{} in{} out{}",
-            small_cluster_count, huge_jump_count, inlier_count, outlier_count
-        );
-        let t7 = format!(
-            "lo{} hi{} dμ{:.1}",
-            low_count, high_count, d_stats.mean()
-        );
-
-        // 追加分を1行に詰める（横幅優先）
-        // 例: "<40130L60/20H3/6"
-        let t8 = format!(
-            "<40{}L{}/{}H{}/{}",
-            d_small_40, low_dsmall40, low_dlarge40, high_dsmall40, high_dlarge40
-        );
-
-        Text::new(&t1, Point::new(2, 35), text_style).draw(display).unwrap();
-        Text::new(&t2, Point::new(2, 47), text_style).draw(display).unwrap();
-        Text::new(&t3, Point::new(2, 59), text_style).draw(display).unwrap();
-        Text::new(&t4, Point::new(2, 71), text_style).draw(display).unwrap();
-        Text::new(&t5, Point::new(2, 83), text_style).draw(display).unwrap();
-
-        Text::new(&t6, Point::new(2, 95), text_style).draw(display).unwrap();
-        Text::new(&t7, Point::new(2, 107), text_style).draw(display).unwrap();
-        Text::new(&t8, Point::new(2, 119), text_style).draw(display).unwrap();
-
-        display.flush().unwrap();
-        return;
-    }
-
-    // min pages: 1..=4
-    if page >= 1 && page <= 4 {
-        let idx = (page - 1) as usize;
-        let s = extremes.min[idx];
-
-        let head = format!("MIN[{}] r={:.4}", idx, s.r);
-        Text::new(&head, Point::new(2, 35), text_style).draw(display).unwrap();
-
-        let raw1 = format!("raw x:{:.2}", s.raw[0]);
-        let raw2 = format!("raw y:{:.2}", s.raw[1]);
-        let raw3 = format!("raw z:{:.2}", s.raw[2]);
-
-        let cal1 = format!("cal x:{:.3}", s.cal[0]);
-        let cal2 = format!("cal y:{:.3}", s.cal[1]);
-        let cal3 = format!("cal z:{:.3}", s.cal[2]);
-
-        Text::new(&raw1, Point::new(2, 47), text_style).draw(display).unwrap();
-        Text::new(&raw2, Point::new(2, 59), text_style).draw(display).unwrap();
-        Text::new(&raw3, Point::new(2, 71), text_style).draw(display).unwrap();
-
-        Text::new(&cal1, Point::new(2, 85), text_style).draw(display).unwrap();
-        Text::new(&cal2, Point::new(2, 97), text_style).draw(display).unwrap();
-        Text::new(&cal3, Point::new(2, 109), text_style).draw(display).unwrap();
-
-        // d_norm = ||raw - offset||
-        let dx = s.raw[0] - offset[0];
-        let dy = s.raw[1] - offset[1];
-        let dz = s.raw[2] - offset[2];
-        let d_norm = libm::sqrtf(dx * dx + dy * dy + dz * dz);
-
-        // 追加行（最下段）
-        let d1 = format!("d:{:.1}", d_norm);
-        Text::new(&d1, Point::new(2, 119), text_style).draw(display).unwrap();
-
-        display.flush().unwrap();
-        return;
-    }
-
-    // max pages: 5..=8
-    if page >= 5 && page <= 8 {
-        let idx = (page - 5) as usize;
-        let s = extremes.max[idx];
-
-        let head = format!("MAX[{}] r={:.4}", idx, s.r);
-        Text::new(&head, Point::new(2, 35), text_style).draw(display).unwrap();
-
-        let raw1 = format!("raw x:{:.2}", s.raw[0]);
-        let raw2 = format!("raw y:{:.2}", s.raw[1]);
-        let raw3 = format!("raw z:{:.2}", s.raw[2]);
-
-        let cal1 = format!("cal x:{:.3}", s.cal[0]);
-        let cal2 = format!("cal y:{:.3}", s.cal[1]);
-        let cal3 = format!("cal z:{:.3}", s.cal[2]);
-
-        Text::new(&raw1, Point::new(2, 47), text_style).draw(display).unwrap();
-        Text::new(&raw2, Point::new(2, 59), text_style).draw(display).unwrap();
-        Text::new(&raw3, Point::new(2, 71), text_style).draw(display).unwrap();
-
-        Text::new(&cal1, Point::new(2, 85), text_style).draw(display).unwrap();
-        Text::new(&cal2, Point::new(2, 97), text_style).draw(display).unwrap();
-        Text::new(&cal3, Point::new(2, 109), text_style).draw(display).unwrap();
-
-        // d_norm = ||raw - offset||
-        let dx = s.raw[0] - offset[0];
-        let dy = s.raw[1] - offset[1];
-        let dz = s.raw[2] - offset[2];
-        let d_norm = libm::sqrtf(dx * dx + dy * dy + dz * dz);
-
-        // 追加行（最下段）
-        let d1 = format!("d:{:.1}", d_norm);
-        Text::new(&d1, Point::new(2, 119), text_style).draw(display).unwrap();
-
-        display.flush().unwrap();
-        return;
-    }
-}
-
-// 初回表示
-draw_page(
-    &mut display,
-    page,
-    total_pages,
-    &test,
-    &extremes,
-    small_cluster_count,
-    huge_jump_count,
-    inlier_count,
-    outlier_count,
-    low_count,
-    high_count,
-    &d_stats,
-    d_small_40,
-    low_dsmall40,
-    low_dlarge40,
-    high_dsmall40,
-    high_dlarge40,
-    offset, // ← 追加
-);
-
-// ボタンでページング（短押しで次へ、最後で0に戻る）
-loop {
-    let btn = button.is_low();
-    if btn && !last_btn {
-        page += 1;
-        if page >= total_pages {
-            page = 0;
-        }
-        draw_page(
-    &mut display,
-    page,
-    total_pages,
-    &test,
-    &extremes,
-    small_cluster_count,
-    huge_jump_count,
-    inlier_count,
-    outlier_count,
-    low_count,
-    high_count,
-    &d_stats,
-    d_small_40,
-    low_dsmall40,
-    low_dlarge40,
-    high_dsmall40,
-    high_dlarge40,
-    offset, // ← 追加
-);
-    }
-    last_btn = btn;
-    delay.delay_millis(30);
-}
-
     // オンライン地磁気キャリブレーション
     let mut rls = mag_rls::MagOnlineRls::new(&mag_calib);
 
@@ -700,42 +372,6 @@ loop {
             mag_noise: 1.0,
             ..Default::default()
     });
-
-    // EKFをまず加速度計で初期化（roll/pitchを確定）
-    for _ in 0..100 {
-        let d = imu.read_imu().unwrap();
-        let (ax, ay, az) = (d.accel.x, d.accel.y, d.accel.z);
-        let (gx, gy, gz) = imu_ekf::degree_to_rad((d.gyro.x, d.gyro.y, d.gyro.z));
-        ekf.update_x_up(
-            ax, ay, az,
-            gx, gy, gz,
-        );
-        delay.delay_millis(1);
-    }
-
-    // 磁場を取得
-    let mag_raw = imu.read_mag().unwrap().unwrap();
-    let mag_cal = mag_calib.apply([mag_raw.x, mag_raw.y, mag_raw.z]);
-
-    // X-up → Z-up 変換
-    let mx = -mag_cal[2];
-    let my = mag_cal[1];
-    let mz = mag_cal[0];
-
-    // EKFから現在のroll/pitchを取得
-    let (roll, pitch, _) = ekf.get_euler();
-
-    // 水平面に射影（運用時と同じ式）
-    let cr = libm::cosf(roll);
-    let sr = libm::sinf(roll);
-    let cp = libm::cosf(pitch);
-    let sp = libm::sinf(pitch);
-
-    let mx_h = mx * cp + my * sr * sp + mz * cr * sp;
-    let my_h = my * cr - mz * sr;
-
-    // 初期Yawオフセット（射影済み）
-    let yaw_offset = libm::atan2f(-my_h, mx_h);
 
     let i2c1 = I2c::new(peripherals.I2C1, 
         I2cConfig::default()
@@ -821,17 +457,17 @@ loop {
                         if counter % RLS_DIV == 0 {
                             rls.update([mag_raw.x, mag_raw.y, mag_raw.z]);
                         }
-                        let mag = rls.apply([mag_raw.x, mag_raw.y, mag_raw.z]); //動的
                         let state = ekf.update_x_up(ax, ay, az, gx, gy, gz);
                         
+                        let mag = rls.apply([mag_raw.x, mag_raw.y, mag_raw.z]); //動的
                         if counter % MAG_DIV == 0 {
-                            ekf.update_mag_yaw_x_up(mag[0], mag[1], mag[2], yaw_offset);
+                            ekf.update_mag_yaw_x_up(mag[0], mag[1], mag[2]);
                         }
                         if counter % PRINT_DIV == 0 {
                             // info!("a={}, {}, {}", ax, ay, az);
                             // info!("g={}, {}, {}", gx, gy, gz);
                             // info!("m=({},{},{})", mag[0], mag[1], mag[2]);
-                            // info!("r={}, {}, {}", state.roll, state.pitch, state.yaw);
+                            info!("r={}, {}, {}", state.roll, state.pitch, state.yaw);
                         }
                         counter += 1;
 
