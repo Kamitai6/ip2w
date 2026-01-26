@@ -258,48 +258,27 @@ impl ImuEkf {
         let mut y = yaw_measured - yaw_predicted;
         while y > PI { y -= 2.0 * PI; }
         while y < -PI { y += 2.0 * PI; }
-        
-        let k_y = 80.0;
-        let r_eff = self.r_mag * (1.0 + k_y * y * y);
 
         // 1次元カルマン更新
         let h = self.compute_yaw_jacobian();
         
         // S = H * P * H^T + R (スカラー)
         let hp = h * self.p;
-        // let s = (hp * h.transpose())[(0, 0)] + self.r_mag;
-        let s = (hp * h.transpose())[(0, 0)] + r_eff;
+        let s = (hp * h.transpose())[(0, 0)] + self.r_mag;
         
         if s.abs() < EPSILON {
             return;
         }
         
         // K = P * H^T / S (7x1)
-        let mut k = self.p * h.transpose() / s;
-        
-        // ===== biasの扱い =====
-        // bias_x, bias_y は磁気Yawから更新しない（固定）
-        k[(4, 0)] = 0.0;
-        k[(5, 0)] = 0.0;
-
-        // bias_z だけは更新させるが、1回の更新量をクランプして暴走を防ぐ
-        const BZ_STEP_MAX: f32 = 0.002; // [rad/s] 1回の磁気更新で動かしてよい上限
-        if y.abs() > 1.0e-6 {
-            let dz = k[(6, 0)] * y; // 今回のbias_z更新量
-            if dz.abs() > BZ_STEP_MAX {
-                k[(6, 0)] *= BZ_STEP_MAX / dz.abs(); // kを縮めて dz を上限に合わせる
-            }
-        } else {
-            k[(6, 0)] = 0.0;
-        }
+        let k = self.p * h.transpose() / s;
 
         // 状態更新
         self.x += k * y;
         
         // 共分散更新（Joseph形式の簡略版）
         let i_kh = CovMatrix::identity() - k * h;
-        // self.p = i_kh * self.p * i_kh.transpose() + k * self.r_mag * k.transpose();
-        self.p = i_kh * self.p * i_kh.transpose() + k * r_eff * k.transpose();
+        self.p = i_kh * self.p * i_kh.transpose() + k * self.r_mag * k.transpose();
         
         self.normalize_quaternion();
         self.ensure_positive_definite();

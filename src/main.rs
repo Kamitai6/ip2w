@@ -442,13 +442,12 @@ fn main() -> ! {
             while let Some(event) = events::get_event() {
                 match event {
                     events::Event::MotionUpdate => {
-                        let start = Instant::now();
-
                         if counter % TEMP_DIV == 0 {
                             imu.update_gyr_temp_compensation(DT * TEMP_DIV as f32).unwrap();
                         }
                         let d = imu.read_immu().unwrap();
-                        // すべてにおいて、xyz => z-yxに変換しているので注意
+                        // 物理的X-up状態 → 計算用Z-up座標系への変換で
+                        // すべて、(x,y,z) => (z,-y,x)に変換しているので注意
                         let (ax, ay, az) = (d.accel.z, -d.accel.y, d.accel.x);
                         let (gx, gy, gz) = imu_ekf::degree_to_rad((d.gyro.z, -d.gyro.y, d.gyro.x));
                         let state = ekf.update(ax, ay, az, gx, gy, gz);
@@ -458,15 +457,12 @@ fn main() -> ! {
                             rls.update([mag_raw.x, mag_raw.y, mag_raw.z]);
                         }
                         let mag = rls.apply([mag_raw.x, mag_raw.y, mag_raw.z]); //動的
-                        let (mx, my, mz) = (mag[2], -mag[1], mag[0]); 
+                        let mag_bmi_axis = [mag[1], mag[0], -mag[2]];
+                        let (mx, my, mz) = (mag_bmi_axis[2], -mag_bmi_axis[1], mag_bmi_axis[0]); 
                         if counter % MAG_DIV == 0 {
-                            // ekf.update_mag_yaw(mx, my, mz);
+                            ekf.update_mag_yaw(mx, my, mz);
                         }
                         if counter % PRINT_DIV == 0 {
-                            let mag_bmi270 = [mag[1], mag[0], -mag[2]];
-                            // let mag_bmi270 = [-mag[1], -mag[0], -mag[2]];
-                            let mag_robot = [mag_bmi270[2], -mag_bmi270[1], mag_bmi270[0]];
-                            info!("yaw_ekf:{}, yaw_mag:{}", state.yaw, atan2f(mag_robot[1], mag_robot[0]));
                             // info!("a={}, {}, {}", ax, ay, az);
                             // info!("g={}, {}, {}", gx, gy, gz);
                             // info!("m=({},{},{})", mc, my, mz);
@@ -508,7 +504,7 @@ fn main() -> ! {
                             smc.reset();
                             yaw_pid.reset();
                             pos_regulator.reset();
-                            // ekf.reset_yaw();
+                            ekf.reset_yaw();
                         }
                         let _ = motion.set_motor(atom_motion::MotorChannel::M1, m1_pwm);
                         let _ = motion.set_motor(atom_motion::MotorChannel::M2, m2_pwm);
@@ -524,11 +520,6 @@ fn main() -> ! {
                             };
                             face.set_emotion(emotion);
                         }
-                        
-                        let elapsed = start.elapsed();
-                        // if counter % 100 == 0 {
-                        //     info!("loop {} elapsed: {}us", counter, elapsed.as_micros());
-                        // }
                     }
                     events::Event::DisplayUpdate => {
                         if display.is_idle() {
