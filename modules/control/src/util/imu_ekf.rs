@@ -237,12 +237,6 @@ impl ImuEkf {
         self.build_current_state(accel_valid)
     }
 
-    /// Yaw角のみを磁場から観測（X-up座標系用）
-    pub fn update_mag_yaw_x_up(&mut self, mx: f32, my: f32, mz: f32) {
-        // X-up → Z-up 変換
-        self.update_mag_yaw(-mz, my, mx)
-    }
-
     /// Yaw角のみを磁場から観測（内部Z-up座標系）
     pub fn update_mag_yaw(&mut self, mx: f32, my: f32, mz: f32) {
         // 現在の姿勢
@@ -258,7 +252,7 @@ impl ImuEkf {
         let my_h = my * cr - mz * sr;
         
         // 測定Yaw
-        let yaw_measured = atan2f(-my_h, mx_h);
+        let yaw_measured = atan2f(my_h, mx_h);
 
         // イノベーション（角度正規化）
         let mut y = yaw_measured - yaw_predicted;
@@ -547,18 +541,6 @@ impl ImuEkf {
             bias_variance: self.p[(4, 4)],
             accel_valid,
         }
-    }
-
-    pub fn update_x_up(
-        &mut self,
-        ax: f32,
-        ay: f32,
-        az: f32,
-        gx: f32,
-        gy: f32,
-        gz: f32,
-    ) -> AttitudeState {
-        self.update(-az, ay, ax, -gz, gy, gx)
     }
 
     #[inline(always)]

@@ -11,7 +11,7 @@ use core::{cell::{RefCell, Cell}, f32::consts::PI};
 use alloc::borrow::ToOwned;
 use critical_section::{Mutex, with};
 use defmt::info;
-use libm::sqrtf;
+use libm::{atan2f, sqrtf};
 use {esp_backtrace as _, esp_println as _};
 
 use esp_hal::{
@@ -434,8 +434,6 @@ fn main() -> ! {
     let mut m2_pwm = 0;
     let mut target_angle = 0.0;
     let mut counter = 0;
-    use heapless::Vec as HVec;
-    let mut buf: HVec<[f32; 3], 1000> = HVec::new();
 
     info!("Start!");
     loop {
@@ -446,28 +444,33 @@ fn main() -> ! {
                     events::Event::MotionUpdate => {
                         let start = Instant::now();
 
-                        // ループ内
                         if counter % TEMP_DIV == 0 {
                             imu.update_gyr_temp_compensation(DT * TEMP_DIV as f32).unwrap();
                         }
                         let d = imu.read_immu().unwrap();
-                        let (ax, ay, az) = (d.accel.x, d.accel.y, d.accel.z);
-                        let (gx, gy, gz) = imu_ekf::degree_to_rad((d.gyro.x, d.gyro.y, d.gyro.z));
+                        // すべてにおいて、xyz => z-yxに変換しているので注意
+                        let (ax, ay, az) = (d.accel.z, -d.accel.y, d.accel.x);
+                        let (gx, gy, gz) = imu_ekf::degree_to_rad((d.gyro.z, -d.gyro.y, d.gyro.x));
+                        let state = ekf.update(ax, ay, az, gx, gy, gz);
+                        
                         let mag_raw = d.mag.unwrap();
                         if counter % RLS_DIV == 0 {
                             rls.update([mag_raw.x, mag_raw.y, mag_raw.z]);
                         }
-                        let state = ekf.update_x_up(ax, ay, az, gx, gy, gz);
-                        
                         let mag = rls.apply([mag_raw.x, mag_raw.y, mag_raw.z]); //動的
+                        let (mx, my, mz) = (mag[2], -mag[1], mag[0]); 
                         if counter % MAG_DIV == 0 {
-                            ekf.update_mag_yaw_x_up(mag[0], mag[1], mag[2]);
+                            // ekf.update_mag_yaw(mx, my, mz);
                         }
                         if counter % PRINT_DIV == 0 {
+                            let mag_bmi270 = [mag[1], mag[0], -mag[2]];
+                            // let mag_bmi270 = [-mag[1], -mag[0], -mag[2]];
+                            let mag_robot = [mag_bmi270[2], -mag_bmi270[1], mag_bmi270[0]];
+                            info!("yaw_ekf:{}, yaw_mag:{}", state.yaw, atan2f(mag_robot[1], mag_robot[0]));
                             // info!("a={}, {}, {}", ax, ay, az);
                             // info!("g={}, {}, {}", gx, gy, gz);
-                            // info!("m=({},{},{})", mag[0], mag[1], mag[2]);
-                            info!("r={}, {}, {}", state.roll, state.pitch, state.yaw);
+                            // info!("m=({},{},{})", mc, my, mz);
+                            // info!("r={}, {}, {}", state.roll, state.pitch, state.yaw);
                         }
                         counter += 1;
 
@@ -481,7 +484,7 @@ fn main() -> ! {
                         }
 
                         if drive {
-                            let now_angle = state.pitch - 0.125;
+                            let now_angle = state.pitch + 0.125;
                             let e = target_angle - now_angle;
                             let e_dot = 0.0 - gy;
                             let fb = smc.update(e, e_dot);
@@ -495,8 +498,8 @@ fn main() -> ! {
                             let yaw_out_max = atom_motion::MOTOR_SPEED_MAX as f32 / 4.0;
                             let yaw_out = yaw_result.clamp(-yaw_out_max, yaw_out_max);
                             
-                            m1_pwm = (base_out + yaw_out).clamp(-atom_max, atom_max) as i8;
-                            m2_pwm = (-base_out + yaw_out).clamp(-atom_max, atom_max) as i8;
+                            m1_pwm = (-base_out + yaw_out).clamp(-atom_max, atom_max) as i8;
+                            m2_pwm = (base_out + yaw_out).clamp(-atom_max, atom_max) as i8;
 
                             target_angle = 0.0 - pos_regulator.update(base_out);
                         } else {
@@ -505,7 +508,7 @@ fn main() -> ! {
                             smc.reset();
                             yaw_pid.reset();
                             pos_regulator.reset();
-                            ekf.reset_yaw();
+                            // ekf.reset_yaw();
                         }
                         let _ = motion.set_motor(atom_motion::MotorChannel::M1, m1_pwm);
                         let _ = motion.set_motor(atom_motion::MotorChannel::M2, m2_pwm);
