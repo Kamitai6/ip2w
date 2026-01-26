@@ -248,12 +248,12 @@ pub enum PerfMode {
 }
 
 // ============================================================================
-// FOC Types
+// Calibrate Types
 // ============================================================================
 
 /// Accelerometer FOC axis configuration
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FocAccAxis {
+pub enum CalibAccAxis {
     Disable,
     /// Axis pointing to +1g
     Plus1g,
@@ -265,28 +265,28 @@ pub enum FocAccAxis {
 
 /// FOC configuration for accelerometer
 #[derive(Debug, Clone, Copy)]
-pub struct FocAccConfig {
-    pub x_axis: FocAccAxis,
-    pub y_axis: FocAccAxis,
-    pub z_axis: FocAccAxis,
+pub struct CalibAccConfig {
+    pub x_axis: CalibAccAxis,
+    pub y_axis: CalibAccAxis,
+    pub z_axis: CalibAccAxis,
 }
 
-impl FocAccConfig {
+impl CalibAccConfig {
     /// Configuration for sensor flat, Z-axis up
     pub fn z_up() -> Self {
         Self {
-            x_axis: FocAccAxis::Zero,
-            y_axis: FocAccAxis::Zero,
-            z_axis: FocAccAxis::Plus1g,
+            x_axis: CalibAccAxis::Zero,
+            y_axis: CalibAccAxis::Zero,
+            z_axis: CalibAccAxis::Plus1g,
         }
     }
 
     /// Configuration for sensor flat, Z-axis down
     pub fn z_down() -> Self {
         Self {
-            x_axis: FocAccAxis::Zero,
-            y_axis: FocAccAxis::Zero,
-            z_axis: FocAccAxis::Minus1g,
+            x_axis: CalibAccAxis::Zero,
+            y_axis: CalibAccAxis::Zero,
+            z_axis: CalibAccAxis::Minus1g,
         }
     }
 }
@@ -922,7 +922,7 @@ impl<I2C: I2c> Bmi270<I2C> {
     /// * `delay` - Delay function taking microseconds [µs]
     pub fn calibrate_acc<D: FnMut(u32)>(
         &mut self,
-        config: FocAccConfig,
+        config: CalibAccConfig,
         mut delay: D,
     ) -> Result<(), Error<I2C::Error>> {
         const NUM_SAMPLES: i32 = 1000;
@@ -941,18 +941,18 @@ impl<I2C: I2c> Bmi270<I2C> {
         // Expected values based on orientation [LSB]
         let sensitivity = self.acc_range.sensitivity();
         let expected_x: i32 = match config.x_axis {
-            FocAccAxis::Plus1g => sensitivity as i32,
-            FocAccAxis::Minus1g => -(sensitivity as i32),
+            CalibAccAxis::Plus1g => sensitivity as i32,
+            CalibAccAxis::Minus1g => -(sensitivity as i32),
             _ => 0,
         };
         let expected_y: i32 = match config.y_axis {
-            FocAccAxis::Plus1g => sensitivity as i32,
-            FocAccAxis::Minus1g => -(sensitivity as i32),
+            CalibAccAxis::Plus1g => sensitivity as i32,
+            CalibAccAxis::Minus1g => -(sensitivity as i32),
             _ => 0,
         };
         let expected_z: i32 = match config.z_axis {
-            FocAccAxis::Plus1g => sensitivity as i32,
-            FocAccAxis::Minus1g => -(sensitivity as i32),
+            CalibAccAxis::Plus1g => sensitivity as i32,
+            CalibAccAxis::Minus1g => -(sensitivity as i32),
             _ => 0,
         };
 
@@ -1028,7 +1028,7 @@ impl<I2C: I2c> Bmi270<I2C> {
     /// * `delay` - Delay function taking microseconds [µs]
     pub fn calibrate_all<D: FnMut(u32)>(
         &mut self,
-        acc_config: FocAccConfig,
+        acc_config: CalibAccConfig,
         mut delay: D,
     ) -> Result<(), Error<I2C::Error>> {
         self.calibrate_acc(acc_config, &mut delay)?;

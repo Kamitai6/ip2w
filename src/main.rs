@@ -70,63 +70,6 @@ const RLS_DIV: u32 = 500;
 static TIMER0: Mutex<RefCell<Option<Timg>>> = Mutex::new(RefCell::new(None));
 pub static TIMER_COUNTER: Mutex<Cell<u32>> = Mutex::new(Cell::new(0));
 
-#[derive(Clone, Copy)]
-pub struct RunningStats { 
-    n: u32, mean: f32, m2: f32, min: f32, max: f32, } impl RunningStats { pub fn new() -> Self { Self { n: 0, mean: 0.0, m2: 0.0, min: f32::INFINITY, max: -f32::INFINITY, } } pub fn push(&mut self, x: f32) { self.n += 1; if x < self.min { self.min = x; } if x > self.max { self.max = x; } let n = self.n as f32; let delta = x - self.mean; self.mean += delta / n; let delta2 = x - self.mean; self.m2 += delta * delta2; } pub fn mean(&self) -> f32 { self.mean } pub fn std(&self) -> f32 { if self.n < 2 { return 0.0; } sqrtf(self.m2 / ((self.n - 1) as f32)) } pub fn min(&self) -> f32 { self.min } pub fn max(&self) -> f32 { self.max } pub fn n(&self) -> u32 { self.n }
-}
-
-#[derive(Clone, Copy)]
-struct Sample {
-    r: f32,
-    raw: [f32; 3],
-    cal: [f32; 3],
-}
-
-impl Default for Sample {
-    fn default() -> Self {
-        Self {
-            r: 0.0,
-            raw: [0.0; 3],
-            cal: [0.0; 3],
-        }
-    }
-}
-
-/// r が小さいものK件 / 大きいものK件を保持
-struct Extremes<const K: usize> {
-    min: [Sample; K],
-    max: [Sample; K],
-}
-
-impl<const K: usize> Extremes<K> {
-    fn new() -> Self {
-        // min側は r=+inf で初期化（小さいものが入る）
-        let init_min = Sample { r: f32::INFINITY, ..Sample::default() };
-        // max側は r=-inf で初期化（大きいものが入る）
-        let init_max = Sample { r: -f32::INFINITY, ..Sample::default() };
-        Self {
-            min: [init_min; K],
-            max: [init_max; K],
-        }
-    }
-
-    fn push(&mut self, s: Sample) {
-        // --- min側（小さい順） ---
-        if s.r < self.min[K - 1].r {
-            self.min[K - 1] = s;
-            // 小さい順にソート
-            self.min.sort_by(|a, b| a.r.partial_cmp(&b.r).unwrap());
-        }
-
-        // --- max側（大きい順） ---
-        if s.r > self.max[K - 1].r {
-            self.max[K - 1] = s;
-            // 大きい順にソート
-            self.max.sort_by(|a, b| b.r.partial_cmp(&a.r).unwrap());
-        }
-    }
-}
-
 #[allow(
     clippy::large_stack_frames,
     reason = "it's not unusual to allocate larger buffers etc. in main"
@@ -158,7 +101,6 @@ fn main() -> ! {
 
     // LP5562
     let mut lp5562 = lp5562::Lp5562::new(I2cRefCellDevice::new(&i2c0_ref_cell));
-    // なぜかよくパニックするので、あとで守勢しなければ
     lp5562.init(&mut |us| delay.delay_micros(us)).unwrap();
     lp5562.set_current(lp5562::Channel::White, 255).unwrap();
     lp5562.set_pwm(lp5562::Channel::White, 255).unwrap(); // 白色点灯
@@ -229,7 +171,7 @@ fn main() -> ! {
     ).unwrap();
 
     /* calibration */
-    // imu.calibrate_acc(bmi270::FocAccConfig::z_up(), |us| delay.delay_micros(us)).unwrap();
+    imu.calibrate_acc(bmi270::CalibAccConfig::z_up(), |us| delay.delay_micros(us)).unwrap();
     // let (ax, ay, az) = imu.read_acc_offset();
     // info!("AccelOffset: x={}, y={}, z={}", ax, ay, az);
     imu.write_acc_offset((33, -123, -144));
@@ -248,7 +190,7 @@ fn main() -> ! {
         47.609695, (-5, -13, -13));
     imu.set_gyr_temp_calibration(calib, 1.0);  // 時定数1秒
 
-    // 空読み
+    // 空読み（必須 & 重要）
     for _ in 0..3 {
         let _ = imu.read_mag().unwrap().unwrap();
         delay.delay_millis(50);
@@ -456,7 +398,7 @@ fn main() -> ! {
                         if counter % RLS_DIV == 0 {
                             rls.update([mag_raw.x, mag_raw.y, mag_raw.z]);
                         }
-                        let mag = rls.apply([mag_raw.x, mag_raw.y, mag_raw.z]); //動的
+                        let mag = rls.apply([mag_raw.x, mag_raw.y, mag_raw.z]);
                         let mag_bmi_axis = [mag[1], mag[0], -mag[2]];
                         let (mx, my, mz) = (mag_bmi_axis[2], -mag_bmi_axis[1], mag_bmi_axis[0]); 
                         if counter % MAG_DIV == 0 {

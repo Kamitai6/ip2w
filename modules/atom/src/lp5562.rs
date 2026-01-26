@@ -64,8 +64,25 @@ impl<I2C: I2c> Lp5562<I2C> {
 
     /// Initialize the LP5562 with default settings
     pub fn init<D: FnMut(u32)>(&mut self, mut delay: D) -> Result<(), I2C::Error> {
-        // Reset the device
-        self.reset()?;
+        // デバイスの起動完了を待つ（電源投入/マイコンリセット直後対策）
+        delay(10_000);
+        // Reset the device (リトライ付き)
+        let mut last_err = None;
+        for _ in 0..5 {
+            match self.reset() {
+                Ok(()) => {
+                    last_err = None;
+                    break;
+                }
+                Err(e) => {
+                    last_err = Some(e);
+                    delay(2000); // 2ms待ってリトライ
+                }
+            }
+        }
+        if let Some(e) = last_err {
+            return Err(e);
+        }
         delay(2000);
         // Enable chip
         self.enable()?;
