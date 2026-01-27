@@ -431,7 +431,8 @@ fn main() -> ! {
                             // info!("a={}, {}, {}", ax, ay, az);
                             // info!("g={}, {}, {}", gx, gy, gz);
                             // info!("m=({},{},{})", mc, my, mz);
-                            // info!("r={}, {}, {}", state.roll, state.pitch, state.yaw);
+                            info!("p: r={}, {}, {}", state_p.roll, state_p.pitch, state_p.yaw);
+                            info!("ud: r={}, {}, {}", state_ud.roll, state_ud.pitch, state_ud.yaw);
                         }
                         counter += 1;
 
@@ -440,7 +441,7 @@ fn main() -> ! {
                         }
                         button_state = button.is_low();
 
-                        let state = state_ud;
+                        let state = state_p;
 
                         if state.roll.abs() > 1.0 || state.pitch.abs() > 1.0 {
                             drive = false;

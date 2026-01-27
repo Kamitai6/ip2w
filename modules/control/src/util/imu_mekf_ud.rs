@@ -290,7 +290,7 @@ impl ImuEkf {
     /// 参考: Thornton, C.L. "Triangular Covariance Factorizations for Kalman Filtering"
     ///       NASA Technical Paper 1294, 1978
     fn thornton_predict(&mut self, f: &SMatrix<f32, 6, 6>) {
-        // デバッグ用：P行列経由で更新（Thorntonのバグ切り分け）
+        // 一旦P経由（Thorntonにバグがある）
         let p = self.reconstruct_p_matrix();
         let p_pred = f * p * f.transpose() 
             + SMatrix::<f32, 6, 6>::from_diagonal(&self.q_diag);
@@ -298,7 +298,7 @@ impl ImuEkf {
     }
 
     #[allow(dead_code)]
-    /// 本来のThornton予測アルゴリズム（デバッグ後に有効化）
+    /// 本来のThornton（バグあり、要修正）
     fn thornton_predict_original(&mut self, f: &SMatrix<f32, 6, 6>) {
         const N: usize = 6;
 
@@ -352,6 +352,15 @@ impl ImuEkf {
 
         self.u = u_new;
         self.d = d_new;
+    }
+
+    #[allow(dead_code)]
+    /// P経由のフォールバック（デバッグ用）
+    fn thornton_predict_p_fallback(&mut self, f: &SMatrix<f32, 6, 6>) {
+        let p = self.reconstruct_p_matrix();
+        let p_pred = f * p * f.transpose() 
+            + SMatrix::<f32, 6, 6>::from_diagonal(&self.q_diag);
+        self.factor_ud(&p_pred);
     }
 
     /// 対称正定値行列を UD 分解（リセット時のみ使用）
@@ -584,16 +593,14 @@ impl ImuEkf {
         self.factor_ud(&p_new);
     }
 
-    /// Bierman 観測更新アルゴリズム
+    /// Bierman 観測更新アルゴリズム (Gemini修正版)
     ///
-    /// スカラー観測 z = h·x + v に対して U, D を更新し、
-    /// カルマンゲインを返す
-    ///
-    /// 参考: Bierman (1977) "Factorization Methods for Discrete Sequential Estimation"
+    /// 参考: Grewal & Andrews, "Kalman Filtering" (Bierman UD Measurement Update)
     fn bierman_update(&mut self, h: &StateVector6, r: f32) -> StateVector6 {
         const N: usize = 6;
 
-        // f = Uᵀ · h
+        // 1. f = Uᵀ · h
+        // Uは上三角なので、i <= j の範囲で計算
         let mut f = StateVector6::zeros();
         for j in 0..N {
             f[j] = h[j];
@@ -602,52 +609,60 @@ impl ImuEkf {
             }
         }
 
-        // v = D · f
-        let mut v = StateVector6::zeros();
+        // 2. g = D · f
+        let mut g = StateVector6::zeros();
         for j in 0..N {
-            v[j] = self.d[j] * f[j];
+            g[j] = self.d[j] * f[j];
         }
 
-        // k を v で初期化（ループ内で更新される）
-        let mut k = v;
+        // 3. ループによる U, D, K の更新
+        // Bierman法は j=0 から N-1 へ向かって処理します
+        let mut k = StateVector6::zeros(); // カルマンゲイン(未スケーリング)の蓄積用
+        let mut alpha = r;                 // 分散の蓄積
 
-        // α₁ = r + v[0]*f[0]
-        let mut alpha_prev = r + v[0] * f[0];
+        for j in 0..N {
+            let alpha_prev = alpha;
+            let f_j = f[j];
+            let g_j = g[j];
 
-        // D[0] の更新: d₁_new = d₁ * r / α₁
-        if alpha_prev.abs() > EPSILON {
-            self.d[0] = self.d[0] * r / alpha_prev;
-        }
+            // α_new = α_prev + f_j * g_j
+            alpha += f_j * g_j;
 
-        // j = 1 to N-1 について処理
-        for j in 1..N {
-            // αⱼ = αⱼ₋₁ + vⱼ * fⱼ
-            let alpha_curr = alpha_prev + v[j] * f[j];
+            let d_old = self.d[j];
 
-            if alpha_curr.abs() < EPSILON {
-                alpha_prev = alpha_curr;
-                continue;
+            // Dの更新: D_new = D_old * (α_prev / α_new)
+            // (alphaが小さすぎる場合のゼロ除算ガード)
+            if alpha > EPSILON {
+                self.d[j] = d_old * alpha_prev / alpha;
             }
 
-            // D[j] の更新: dⱼ_new = dⱼ * αⱼ₋₁ / αⱼ
-            self.d[j] = self.d[j] * alpha_prev / alpha_curr;
+            // U と K の更新
+            // λ = -f_j / α_prev
+            let lambda = if alpha_prev.abs() > EPSILON {
+                -f_j / alpha_prev
+            } else {
+                0.0
+            };
 
-            // μ = -fⱼ / αⱼ₋₁
-            let mu = -f[j] / alpha_prev;
-
-            // U と k の同時更新（古い u_ij を使う！）
+            // Uのj列目 (i < j) を更新
+            // U_new_col_j = U_old_col_j + λ * K_prev
+            // K_new       = K_prev      + g_j * U_old_col_j
             for i in 0..j {
                 let u_ij_old = self.u[(i, j)];
-                self.u[(i, j)] = u_ij_old + mu * k[i];
-                k[i] = k[i] + v[j] * u_ij_old;
-            }
 
-            alpha_prev = alpha_curr;
+                self.u[(i, j)] = u_ij_old + lambda * k[i];
+                k[i] += g_j * u_ij_old;
+            }
+            // Kの現在の要素 (i=j) に g_j を加算 (U_jjは常に1なので)
+            k[j] += g_j;
         }
 
-        // 最終的なカルマンゲイン K = k / αₙ
-        if alpha_prev.abs() > EPSILON {
-            k /= alpha_prev;
+        // 4. 最終的なカルマンゲインのスケーリング
+        // K = K_unscaled / alpha_final
+        if alpha > EPSILON {
+            k /= alpha;
+        } else {
+            return StateVector6::zeros();
         }
 
         k
