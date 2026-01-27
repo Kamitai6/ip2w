@@ -440,7 +440,7 @@ fn main() -> ! {
                         }
                         button_state = button.is_low();
 
-                        let state = state_p;
+                        let state = state_ud;
 
                         if state.roll.abs() > 1.0 || state.pitch.abs() > 1.0 {
                             drive = false;

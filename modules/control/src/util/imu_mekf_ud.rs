@@ -389,8 +389,42 @@ impl ImuEkf {
         }
     }
 
-    /// 加速度計による観測更新
+    /// 加速度計による観測更新（Bierman版）
     fn update_accel(&mut self, ax: f32, ay: f32, az: f32) {
+        let a_meas = Vector3::new(ax, ay, az);
+        let g_body = self.gravity_in_body();
+
+        // 3軸を順次スカラー観測として処理
+        let g_skew = skew_symmetric(&g_body);
+
+        // 各軸の観測ベクトル h と イノベーション y
+        for axis in 0..3 {
+            let y = a_meas[axis] - g_body[axis];
+
+            // h = [g_skew の axis 行, 0, 0, 0]
+            let mut h = StateVector6::zeros();
+            for j in 0..3 {
+                h[j] = g_skew[(axis, j)];
+            }
+
+            // Bierman 更新
+            let k = self.bierman_update(&h, self.r_accel);
+
+            // 誤差状態の更新
+            let dx = k * y;
+            let delta_theta = Vector3::new(dx[0], dx[1], dx[2]);
+            let delta_bias = Vector3::new(dx[3], dx[4], dx[5]);
+
+            // 参照状態の更新（乗法的、右から）
+            let delta_q = self.small_angle_quaternion(&(delta_theta * 0.5));
+            self.q_ref = self.q_ref * delta_q;
+            self.bias += delta_bias;
+        }
+    }
+
+    #[allow(dead_code)]
+    /// P経由版（デバッグ用）
+    fn update_accel_p_fallback(&mut self, ax: f32, ay: f32, az: f32) {
         let a_meas = Vector3::new(ax, ay, az);
         let g_body = self.gravity_in_body();
 
@@ -439,42 +473,55 @@ impl ImuEkf {
         self.factor_ud(&p_new);
     }
 
-    #[allow(dead_code)]
-    /// 元のBierman版（デバッグ後に有効化）
-    fn update_accel_bierman(&mut self, ax: f32, ay: f32, az: f32) {
-        let a_meas = Vector3::new(ax, ay, az);
-        let g_body = self.gravity_in_body();
+    /// Yaw角のみを磁場から観測更新（Bierman版）
+    pub fn update_mag_yaw(&mut self, mx: f32, my: f32, mz: f32) {
+        let (roll, pitch, yaw_predicted) = self.q_ref.euler_angles();
 
-        // 3軸を順次スカラー観測として処理
-        let g_skew = skew_symmetric(&g_body);
+        // 磁場を水平面に射影
+        let cr = cosf(roll);
+        let sr = sinf(roll);
+        let cp = cosf(pitch);
+        let sp = sinf(pitch);
 
-        // 各軸の観測ベクトル h と イノベーション y
-        for axis in 0..3 {
-            let y = a_meas[axis] - g_body[axis];
+        let mx_h = mx * cp + my * sr * sp + mz * cr * sp;
+        let my_h = my * cr - mz * sr;
 
-            // h = [g_skew の axis 行, 0, 0, 0]
-            let mut h = StateVector6::zeros();
-            for j in 0..3 {
-                h[j] = g_skew[(axis, j)];
-            }
+        let yaw_measured = atan2f(my_h, mx_h);
 
-            // Bierman 更新
-            let k = self.bierman_update(&h, self.r_accel);
-
-            // 誤差状態の更新
-            let dx = k * y;
-            let delta_theta = Vector3::new(dx[0], dx[1], dx[2]);
-            let delta_bias = Vector3::new(dx[3], dx[4], dx[5]);
-
-            // 参照状態の更新（乗法的、右から）
-            let delta_q = self.small_angle_quaternion(&(delta_theta * 0.5));
-            self.q_ref = self.q_ref * delta_q;
-            self.bias += delta_bias;
+        // イノベーション
+        let mut y = yaw_measured - yaw_predicted;
+        while y > PI {
+            y -= 2.0 * PI;
         }
+        while y < -PI {
+            y += 2.0 * PI;
+        }
+
+        // 観測ベクトル h
+        let rot = self.q_ref.to_rotation_matrix();
+        let r_row2 = rot.matrix().row(2);
+
+        let mut h = StateVector6::zeros();
+        h[0] = r_row2[0];
+        h[1] = r_row2[1];
+        h[2] = r_row2[2];
+
+        // Bierman 更新
+        let k = self.bierman_update(&h, self.r_mag);
+
+        // 誤差状態の更新
+        let dx = k * y;
+        let delta_theta = Vector3::new(dx[0], dx[1], dx[2]);
+        let delta_bias = Vector3::new(dx[3], dx[4], dx[5]);
+
+        let delta_q = self.small_angle_quaternion(&(delta_theta * 0.5));
+        self.q_ref = self.q_ref * delta_q;
+        self.bias += delta_bias;
     }
 
-    /// Yaw角のみを磁場から観測更新
-    pub fn update_mag_yaw(&mut self, mx: f32, my: f32, mz: f32) {
+    #[allow(dead_code)]
+    /// P経由版（デバッグ用）
+    fn update_mag_yaw_p_fallback(&mut self, mx: f32, my: f32, mz: f32) {
         let (roll, pitch, yaw_predicted) = self.q_ref.euler_angles();
 
         // 磁場を水平面に射影
@@ -537,53 +584,6 @@ impl ImuEkf {
         self.factor_ud(&p_new);
     }
 
-    #[allow(dead_code)]
-    /// 元のBierman版（デバッグ後に有効化）
-    fn update_mag_yaw_bierman(&mut self, mx: f32, my: f32, mz: f32) {
-        let (roll, pitch, yaw_predicted) = self.q_ref.euler_angles();
-
-        // 磁場を水平面に射影
-        let cr = cosf(roll);
-        let sr = sinf(roll);
-        let cp = cosf(pitch);
-        let sp = sinf(pitch);
-
-        let mx_h = mx * cp + my * sr * sp + mz * cr * sp;
-        let my_h = my * cr - mz * sr;
-
-        let yaw_measured = atan2f(my_h, mx_h);
-
-        // イノベーション
-        let mut y = yaw_measured - yaw_predicted;
-        while y > PI {
-            y -= 2.0 * PI;
-        }
-        while y < -PI {
-            y += 2.0 * PI;
-        }
-
-        // 観測ベクトル h
-        let rot = self.q_ref.to_rotation_matrix();
-        let r_row2 = rot.matrix().row(2);
-
-        let mut h = StateVector6::zeros();
-        h[0] = r_row2[0];
-        h[1] = r_row2[1];
-        h[2] = r_row2[2];
-
-        // Bierman 更新
-        let k = self.bierman_update(&h, self.r_mag);
-
-        // 誤差状態の更新
-        let dx = k * y;
-        let delta_theta = Vector3::new(dx[0], dx[1], dx[2]);
-        let delta_bias = Vector3::new(dx[3], dx[4], dx[5]);
-
-        let delta_q = self.small_angle_quaternion(&(delta_theta * 0.5));
-        self.q_ref = self.q_ref * delta_q;
-        self.bias += delta_bias;
-    }
-
     /// Bierman 観測更新アルゴリズム
     ///
     /// スカラー観測 z = h·x + v に対して U, D を更新し、
@@ -602,65 +602,54 @@ impl ImuEkf {
             }
         }
 
-        // g = D · f
-        let mut g = StateVector6::zeros();
+        // v = D · f
+        let mut v = StateVector6::zeros();
         for j in 0..N {
-            g[j] = self.d[j] * f[j];
+            v[j] = self.d[j] * f[j];
         }
 
-        // α[0] = r + g[0]·f[0], α[j] = α[j-1] + g[j]·f[j]
-        let mut alpha = [0.0f32; N + 1];
-        alpha[0] = r;
-        for j in 0..N {
-            alpha[j + 1] = alpha[j] + g[j] * f[j];
+        // k を v で初期化（ループ内で更新される）
+        let mut k = v;
+
+        // α₁ = r + v[0]*f[0]
+        let mut alpha_prev = r + v[0] * f[0];
+
+        // D[0] の更新: d₁_new = d₁ * r / α₁
+        if alpha_prev.abs() > EPSILON {
+            self.d[0] = self.d[0] * r / alpha_prev;
         }
 
-        // 最終的な α = hᵀ·P·h + r（イノベーション分散）
-        let alpha_final = alpha[N];
-        if alpha_final < EPSILON {
-            return StateVector6::zeros();
-        }
+        // j = 1 to N-1 について処理
+        for j in 1..N {
+            // αⱼ = αⱼ₋₁ + vⱼ * fⱼ
+            let alpha_curr = alpha_prev + v[j] * f[j];
 
-        // カルマンゲイン K = P·h / α = U·g / α
-        let mut k = StateVector6::zeros();
-        for i in 0..N {
-            k[i] = g[i];
-            for j in (i + 1)..N {
-                k[i] += self.u[(i, j)] * g[j];
-            }
-        }
-        k /= alpha_final;
-
-        // U, D の更新
-        // 逆順で処理
-        for j in (1..N).rev() {
-            let alpha_j = alpha[j];
-            let alpha_jm1 = alpha[j - 1];
-
-            if alpha_j < EPSILON || alpha_jm1 < EPSILON {
+            if alpha_curr.abs() < EPSILON {
+                alpha_prev = alpha_curr;
                 continue;
             }
 
-            // D[j] の更新
-            self.d[j] = alpha_jm1 * self.d[j] / alpha_j;
+            // D[j] の更新: dⱼ_new = dⱼ * αⱼ₋₁ / αⱼ
+            self.d[j] = self.d[j] * alpha_prev / alpha_curr;
 
-            // U の j 列を更新
-            let lambda = -f[j] / alpha_jm1;
+            // μ = -fⱼ / αⱼ₋₁
+            let mu = -f[j] / alpha_prev;
+
+            // U と k の同時更新（古い u_ij を使う！）
             for i in 0..j {
                 let u_ij_old = self.u[(i, j)];
-                self.u[(i, j)] = u_ij_old + lambda * k[i] * alpha_j;
-                // k[i] も同時に更新（次のイテレーション用）
-                // ただし k は最後に返すので、別の変数で追跡
+                self.u[(i, j)] = u_ij_old + mu * k[i];
+                k[i] = k[i] + v[j] * u_ij_old;
             }
+
+            alpha_prev = alpha_curr;
         }
 
-        // D[0] の更新
-        if alpha[1] > EPSILON {
-            self.d[0] = r * self.d[0] / alpha[1];
+        // 最終的なカルマンゲイン K = k / αₙ
+        if alpha_prev.abs() > EPSILON {
+            k /= alpha_prev;
         }
 
-        // 再計算した k を返す（上のループで k が変わる可能性があるため）
-        // 実際には最初に計算した k が正しいカルマンゲイン
         k
     }
 
