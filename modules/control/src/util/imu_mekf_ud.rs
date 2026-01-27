@@ -354,15 +354,6 @@ impl ImuEkf {
         self.d = d_new;
     }
 
-    #[allow(dead_code)]
-    /// P経由のフォールバック（デバッグ用）
-    fn thornton_predict_p_fallback(&mut self, f: &SMatrix<f32, 6, 6>) {
-        let p = self.reconstruct_p_matrix();
-        let p_pred = f * p * f.transpose() 
-            + SMatrix::<f32, 6, 6>::from_diagonal(&self.q_diag);
-        self.factor_ud(&p_pred);
-    }
-
     /// 対称正定値行列を UD 分解（リセット時のみ使用）
     /// P = U·D·Uᵀ の形に分解
     #[allow(dead_code)]
@@ -401,13 +392,12 @@ impl ImuEkf {
     /// 加速度計による観測更新（Bierman版）
     fn update_accel(&mut self, ax: f32, ay: f32, az: f32) {
         let a_meas = Vector3::new(ax, ay, az);
-        let g_body = self.gravity_in_body();
 
-        // 3軸を順次スカラー観測として処理
-        let g_skew = skew_symmetric(&g_body);
-
-        // 各軸の観測ベクトル h と イノベーション y
+        // 3軸を順次スカラー観測として処理（各軸で線形化点を更新）
         for axis in 0..3 {
+            let g_body = self.gravity_in_body();
+            let g_skew = skew_symmetric(&g_body);
+
             let y = a_meas[axis] - g_body[axis];
 
             // h = [g_skew の axis 行, 0, 0, 0]
@@ -416,70 +406,16 @@ impl ImuEkf {
                 h[j] = g_skew[(axis, j)];
             }
 
-            // Bierman 更新
             let k = self.bierman_update(&h, self.r_accel);
 
-            // 誤差状態の更新
             let dx = k * y;
             let delta_theta = Vector3::new(dx[0], dx[1], dx[2]);
-            let delta_bias = Vector3::new(dx[3], dx[4], dx[5]);
+            let delta_bias  = Vector3::new(dx[3], dx[4], dx[5]);
 
-            // 参照状態の更新（乗法的、右から）
             let delta_q = self.small_angle_quaternion(&(delta_theta * 0.5));
             self.q_ref = self.q_ref * delta_q;
             self.bias += delta_bias;
         }
-    }
-
-    #[allow(dead_code)]
-    /// P経由版（デバッグ用）
-    fn update_accel_p_fallback(&mut self, ax: f32, ay: f32, az: f32) {
-        let a_meas = Vector3::new(ax, ay, az);
-        let g_body = self.gravity_in_body();
-
-        // イノベーション
-        let y = a_meas - g_body;
-
-        // 観測ヤコビアン H (3×6)
-        let g_skew = skew_symmetric(&g_body);
-        let mut h = SMatrix::<f32, 3, 6>::zeros();
-        for i in 0..3 {
-            for j in 0..3 {
-                h[(i, j)] = g_skew[(i, j)];
-            }
-        }
-
-        // P行列を復元
-        let p = self.reconstruct_p_matrix();
-
-        // 観測ノイズ R
-        let r = Matrix3::from_diagonal(&Vector3::new(self.r_accel, self.r_accel, self.r_accel));
-
-        // イノベーション共分散 S = H * P * Hᵀ + R
-        let s = h * p * h.transpose() + r;
-
-        // カルマンゲイン K = P * Hᵀ * S⁻¹
-        let s_inv = s
-            .try_inverse()
-            .unwrap_or_else(|| Matrix3::identity() * (1.0 / EPSILON));
-        let k = p * h.transpose() * s_inv;
-
-        // 誤差状態の推定
-        let dx = k * y;
-        let delta_theta = Vector3::new(dx[0], dx[1], dx[2]);
-        let delta_bias = Vector3::new(dx[3], dx[4], dx[5]);
-
-        // 参照状態の更新（乗法的、右から）
-        let delta_q = self.small_angle_quaternion(&(delta_theta * 0.5));
-        self.q_ref = self.q_ref * delta_q;
-        self.bias += delta_bias;
-
-        // 共分散更新（Joseph形式）
-        let i_kh = SMatrix::<f32, 6, 6>::identity() - k * h;
-        let p_new = i_kh * p * i_kh.transpose() + k * r * k.transpose();
-
-        // P_new を UD分解
-        self.factor_ud(&p_new);
     }
 
     /// Yaw角のみを磁場から観測更新（Bierman版）
@@ -528,71 +464,6 @@ impl ImuEkf {
         self.bias += delta_bias;
     }
 
-    #[allow(dead_code)]
-    /// P経由版（デバッグ用）
-    fn update_mag_yaw_p_fallback(&mut self, mx: f32, my: f32, mz: f32) {
-        let (roll, pitch, yaw_predicted) = self.q_ref.euler_angles();
-
-        // 磁場を水平面に射影
-        let cr = cosf(roll);
-        let sr = sinf(roll);
-        let cp = cosf(pitch);
-        let sp = sinf(pitch);
-
-        let mx_h = mx * cp + my * sr * sp + mz * cr * sp;
-        let my_h = my * cr - mz * sr;
-
-        let yaw_measured = atan2f(my_h, mx_h);
-
-        // イノベーション
-        let mut y = yaw_measured - yaw_predicted;
-        while y > PI {
-            y -= 2.0 * PI;
-        }
-        while y < -PI {
-            y += 2.0 * PI;
-        }
-
-        // 観測ベクトル h (1×6)
-        let rot = self.q_ref.to_rotation_matrix();
-        let r_row2 = rot.matrix().row(2);
-
-        let mut h = SMatrix::<f32, 1, 6>::zeros();
-        h[(0, 0)] = r_row2[0];
-        h[(0, 1)] = r_row2[1];
-        h[(0, 2)] = r_row2[2];
-
-        // P行列を復元
-        let p = self.reconstruct_p_matrix();
-
-        // S = H * P * Hᵀ + R (スカラー)
-        let hp = h * p;
-        let s = (hp * h.transpose())[(0, 0)] + self.r_mag;
-
-        if s.abs() < EPSILON {
-            return;
-        }
-
-        // K = P * Hᵀ / S (6×1)
-        let k = p * h.transpose() / s;
-
-        // 誤差状態の推定
-        let dx = k * y;
-        let delta_theta = Vector3::new(dx[(0, 0)], dx[(1, 0)], dx[(2, 0)]);
-        let delta_bias = Vector3::new(dx[(3, 0)], dx[(4, 0)], dx[(5, 0)]);
-
-        let delta_q = self.small_angle_quaternion(&(delta_theta * 0.5));
-        self.q_ref = self.q_ref * delta_q;
-        self.bias += delta_bias;
-
-        // 共分散更新（Joseph形式）
-        let i_kh = SMatrix::<f32, 6, 6>::identity() - k * h;
-        let p_new = i_kh * p * i_kh.transpose() + k * self.r_mag * k.transpose();
-
-        // P_new を UD分解
-        self.factor_ud(&p_new);
-    }
-
     /// Bierman 観測更新アルゴリズム (Gemini修正版)
     ///
     /// 参考: Grewal & Andrews, "Kalman Filtering" (Bierman UD Measurement Update)
@@ -632,7 +503,7 @@ impl ImuEkf {
 
             // Dの更新: D_new = D_old * (α_prev / α_new)
             // (alphaが小さすぎる場合のゼロ除算ガード)
-            if alpha > EPSILON {
+            if alpha.abs() > EPSILON {
                 self.d[j] = d_old * alpha_prev / alpha;
             }
 
@@ -659,7 +530,7 @@ impl ImuEkf {
 
         // 4. 最終的なカルマンゲインのスケーリング
         // K = K_unscaled / alpha_final
-        if alpha > EPSILON {
+        if alpha.abs() > EPSILON {
             k /= alpha;
         } else {
             return StateVector6::zeros();

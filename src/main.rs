@@ -311,7 +311,7 @@ fn main() -> ! {
             gyro_noise: 0.05,
             gyro_bias_noise: 0.0005,
             accel_noise: 0.15,
-            mag_noise: 1.0,
+            mag_noise: 0.5,
             ..Default::default()
     });
     let mut ekf_ud = imu_mekf_ud::ImuEkf::new(
@@ -320,7 +320,7 @@ fn main() -> ! {
             gyro_noise: 0.05,
             gyro_bias_noise: 0.0005,
             accel_noise: 0.15,
-            mag_noise: 1.0,
+            mag_noise: 0.5,
             ..Default::default()
     });
 
