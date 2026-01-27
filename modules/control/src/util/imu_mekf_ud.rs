@@ -136,6 +136,21 @@ impl Default for AttitudeState {
     }
 }
 
+/// UD分解の検証結果
+#[derive(Debug, Clone, Copy)]
+pub struct ValidationResult {
+    /// D の最小値（正であるべき）
+    pub d_min: f32,
+    /// D の最大値
+    pub d_max: f32,
+    /// U の対角成分の最大誤差（0であるべき）
+    pub u_diag_error: f32,
+    /// P の対称性誤差
+    pub p_symmetry_error: f32,
+    /// 全チェックがパスしたか
+    pub valid: bool,
+}
+
 /// UD-MEKF: Multiplicative EKF with UD Decomposition
 pub struct ImuEkf {
     /// 参照クォータニオン（姿勢の推定値）
@@ -275,6 +290,16 @@ impl ImuEkf {
     /// 参考: Thornton, C.L. "Triangular Covariance Factorizations for Kalman Filtering"
     ///       NASA Technical Paper 1294, 1978
     fn thornton_predict(&mut self, f: &SMatrix<f32, 6, 6>) {
+        // デバッグ用：P行列経由で更新（Thorntonのバグ切り分け）
+        let p = self.reconstruct_p_matrix();
+        let p_pred = f * p * f.transpose() 
+            + SMatrix::<f32, 6, 6>::from_diagonal(&self.q_diag);
+        self.factor_ud(&p_pred);
+    }
+
+    #[allow(dead_code)]
+    /// 本来のThornton予測アルゴリズム（デバッグ後に有効化）
+    fn thornton_predict_original(&mut self, f: &SMatrix<f32, 6, 6>) {
         const N: usize = 6;
 
         // W = F · U （後で列アクセスするので、各列を個別に計算）
@@ -369,6 +394,57 @@ impl ImuEkf {
         let a_meas = Vector3::new(ax, ay, az);
         let g_body = self.gravity_in_body();
 
+        // イノベーション
+        let y = a_meas - g_body;
+
+        // 観測ヤコビアン H (3×6)
+        let g_skew = skew_symmetric(&g_body);
+        let mut h = SMatrix::<f32, 3, 6>::zeros();
+        for i in 0..3 {
+            for j in 0..3 {
+                h[(i, j)] = g_skew[(i, j)];
+            }
+        }
+
+        // P行列を復元
+        let p = self.reconstruct_p_matrix();
+
+        // 観測ノイズ R
+        let r = Matrix3::from_diagonal(&Vector3::new(self.r_accel, self.r_accel, self.r_accel));
+
+        // イノベーション共分散 S = H * P * Hᵀ + R
+        let s = h * p * h.transpose() + r;
+
+        // カルマンゲイン K = P * Hᵀ * S⁻¹
+        let s_inv = s
+            .try_inverse()
+            .unwrap_or_else(|| Matrix3::identity() * (1.0 / EPSILON));
+        let k = p * h.transpose() * s_inv;
+
+        // 誤差状態の推定
+        let dx = k * y;
+        let delta_theta = Vector3::new(dx[0], dx[1], dx[2]);
+        let delta_bias = Vector3::new(dx[3], dx[4], dx[5]);
+
+        // 参照状態の更新（乗法的、右から）
+        let delta_q = self.small_angle_quaternion(&(delta_theta * 0.5));
+        self.q_ref = self.q_ref * delta_q;
+        self.bias += delta_bias;
+
+        // 共分散更新（Joseph形式）
+        let i_kh = SMatrix::<f32, 6, 6>::identity() - k * h;
+        let p_new = i_kh * p * i_kh.transpose() + k * r * k.transpose();
+
+        // P_new を UD分解
+        self.factor_ud(&p_new);
+    }
+
+    #[allow(dead_code)]
+    /// 元のBierman版（デバッグ後に有効化）
+    fn update_accel_bierman(&mut self, ax: f32, ay: f32, az: f32) {
+        let a_meas = Vector3::new(ax, ay, az);
+        let g_body = self.gravity_in_body();
+
         // 3軸を順次スカラー観測として処理
         let g_skew = skew_symmetric(&g_body);
 
@@ -394,14 +470,76 @@ impl ImuEkf {
             let delta_q = self.small_angle_quaternion(&(delta_theta * 0.5));
             self.q_ref = self.q_ref * delta_q;
             self.bias += delta_bias;
-
-            // 次の軸のために g_body を再計算（姿勢が変わったので）
-            // 実際には微小変化なので省略可能だが、厳密には必要
         }
     }
 
     /// Yaw角のみを磁場から観測更新
     pub fn update_mag_yaw(&mut self, mx: f32, my: f32, mz: f32) {
+        let (roll, pitch, yaw_predicted) = self.q_ref.euler_angles();
+
+        // 磁場を水平面に射影
+        let cr = cosf(roll);
+        let sr = sinf(roll);
+        let cp = cosf(pitch);
+        let sp = sinf(pitch);
+
+        let mx_h = mx * cp + my * sr * sp + mz * cr * sp;
+        let my_h = my * cr - mz * sr;
+
+        let yaw_measured = atan2f(my_h, mx_h);
+
+        // イノベーション
+        let mut y = yaw_measured - yaw_predicted;
+        while y > PI {
+            y -= 2.0 * PI;
+        }
+        while y < -PI {
+            y += 2.0 * PI;
+        }
+
+        // 観測ベクトル h (1×6)
+        let rot = self.q_ref.to_rotation_matrix();
+        let r_row2 = rot.matrix().row(2);
+
+        let mut h = SMatrix::<f32, 1, 6>::zeros();
+        h[(0, 0)] = r_row2[0];
+        h[(0, 1)] = r_row2[1];
+        h[(0, 2)] = r_row2[2];
+
+        // P行列を復元
+        let p = self.reconstruct_p_matrix();
+
+        // S = H * P * Hᵀ + R (スカラー)
+        let hp = h * p;
+        let s = (hp * h.transpose())[(0, 0)] + self.r_mag;
+
+        if s.abs() < EPSILON {
+            return;
+        }
+
+        // K = P * Hᵀ / S (6×1)
+        let k = p * h.transpose() / s;
+
+        // 誤差状態の推定
+        let dx = k * y;
+        let delta_theta = Vector3::new(dx[(0, 0)], dx[(1, 0)], dx[(2, 0)]);
+        let delta_bias = Vector3::new(dx[(3, 0)], dx[(4, 0)], dx[(5, 0)]);
+
+        let delta_q = self.small_angle_quaternion(&(delta_theta * 0.5));
+        self.q_ref = self.q_ref * delta_q;
+        self.bias += delta_bias;
+
+        // 共分散更新（Joseph形式）
+        let i_kh = SMatrix::<f32, 6, 6>::identity() - k * h;
+        let p_new = i_kh * p * i_kh.transpose() + k * self.r_mag * k.transpose();
+
+        // P_new を UD分解
+        self.factor_ud(&p_new);
+    }
+
+    #[allow(dead_code)]
+    /// 元のBierman版（デバッグ後に有効化）
+    fn update_mag_yaw_bierman(&mut self, mx: f32, my: f32, mz: f32) {
         let (roll, pitch, yaw_predicted) = self.q_ref.euler_angles();
 
         // 磁場を水平面に射影
@@ -665,6 +803,95 @@ impl ImuEkf {
     #[inline(always)]
     pub fn is_initialized(&self) -> bool {
         self.initialized
+    }
+
+    // ===== 検証・デバッグ用メソッド =====
+
+    /// UD分解の整合性をチェック
+    pub fn validate(&self) -> ValidationResult {
+        const N: usize = 6;
+
+        // D の範囲チェック
+        let mut d_min = f32::MAX;
+        let mut d_max = f32::MIN;
+        for i in 0..N {
+            d_min = d_min.min(self.d[i]);
+            d_max = d_max.max(self.d[i]);
+        }
+
+        // U の対角成分チェック（全て 1 であるべき）
+        let mut u_diag_error = 0.0f32;
+        for i in 0..N {
+            u_diag_error = u_diag_error.max((self.u[(i, i)] - 1.0).abs());
+        }
+
+        // P を復元して対称性チェック
+        let p = self.reconstruct_p_matrix();
+        let mut p_symmetry_error = 0.0f32;
+        for i in 0..N {
+            for j in (i + 1)..N {
+                p_symmetry_error = p_symmetry_error.max((p[(i, j)] - p[(j, i)]).abs());
+            }
+        }
+
+        let valid = d_min > 0.0 && u_diag_error < EPSILON && p_symmetry_error < 1e-5;
+
+        ValidationResult {
+            d_min,
+            d_max,
+            u_diag_error,
+            p_symmetry_error,
+            valid,
+        }
+    }
+
+    /// D ベクトルを取得
+    pub fn get_d(&self) -> [f32; 6] {
+        [
+            self.d[0], self.d[1], self.d[2],
+            self.d[3], self.d[4], self.d[5],
+        ]
+    }
+
+    /// U 行列を取得（行優先）
+    pub fn get_u(&self) -> [[f32; 6]; 6] {
+        let mut result = [[0.0f32; 6]; 6];
+        for i in 0..6 {
+            for j in 0..6 {
+                result[i][j] = self.u[(i, j)];
+            }
+        }
+        result
+    }
+
+    /// P = U·D·Uᵀ を復元（行優先）
+    pub fn reconstruct_p(&self) -> [[f32; 6]; 6] {
+        let p = self.reconstruct_p_matrix();
+        let mut result = [[0.0f32; 6]; 6];
+        for i in 0..6 {
+            for j in 0..6 {
+                result[i][j] = p[(i, j)];
+            }
+        }
+        result
+    }
+
+    /// P = U·D·Uᵀ を nalgebra 行列として復元
+    fn reconstruct_p_matrix(&self) -> SMatrix<f32, 6, 6> {
+        let d_mat = SMatrix::<f32, 6, 6>::from_diagonal(&self.d);
+        self.u * d_mat * self.u.transpose()
+    }
+
+    /// P の対角成分のみ取得（分散）
+    pub fn get_variances(&self) -> [f32; 6] {
+        [
+            self.compute_variance(0),
+            self.compute_variance(1),
+            self.compute_variance(2),
+            self.compute_variance(3),
+            self.compute_variance(4),
+            self.compute_variance(5),
+        ]
     }
 }
 
