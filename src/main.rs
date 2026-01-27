@@ -408,7 +408,7 @@ fn main() -> ! {
                             // info!("a={}, {}, {}", ax, ay, az);
                             // info!("g={}, {}, {}", gx, gy, gz);
                             // info!("m=({},{},{})", mc, my, mz);
-                            // info!("r={}, {}, {}", state.roll, state.pitch, state.yaw);
+                            info!("r={}, {}, {}", state.roll, state.pitch, state.yaw);
                         }
                         counter += 1;
 
