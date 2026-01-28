@@ -290,68 +290,11 @@ impl ImuEkf {
     /// 参考: Thornton, C.L. "Triangular Covariance Factorizations for Kalman Filtering"
     ///       NASA Technical Paper 1294, 1978
     fn thornton_predict(&mut self, f: &SMatrix<f32, 6, 6>) {
-        // 一旦P経由（Thorntonにバグがある）
+        // デバッグ用：P行列経由で更新（Thorntonのバグ切り分け）
         let p = self.reconstruct_p_matrix();
         let p_pred = f * p * f.transpose() 
             + SMatrix::<f32, 6, 6>::from_diagonal(&self.q_diag);
         self.factor_ud(&p_pred);
-    }
-
-    #[allow(dead_code)]
-    /// 本来のThornton（バグあり、要修正）
-    fn thornton_predict_original(&mut self, f: &SMatrix<f32, 6, 6>) {
-        const N: usize = 6;
-
-        // W = F · U （後で列アクセスするので、各列を個別に計算）
-        // W[i,k] = Σ F[i,m] · U[m,k]
-        let fu = f * self.u;
-
-        // 作業用配列（Wの列を保持、更新していく）
-        let mut w_col: [StateVector6; N] = [StateVector6::zeros(); N];
-        for k in 0..N {
-            for i in 0..N {
-                w_col[k][i] = fu[(i, k)];
-            }
-        }
-
-        let mut d_new = DVector::zeros();
-        let mut u_new = UMatrix::identity();
-
-        // j = N-1, ..., 0 の順で処理
-        for j in (0..N).rev() {
-            // σ = Σ(W[j,k]² · D[k]) + Q[j]
-            let mut sigma = self.q_diag[j];
-            for k in 0..N {
-                let w_jk = w_col[k][j];
-                sigma += w_jk * w_jk * self.d[k];
-            }
-            d_new[j] = sigma.max(EPSILON);
-
-            if sigma < EPSILON {
-                continue;
-            }
-
-            let inv_sigma = 1.0 / sigma;
-
-            // i = 0, ..., j-1 について
-            for i in 0..j {
-                // σ_ij = Σ(W[i,k] · D[k] · W[j,k])
-                let mut sigma_ij = 0.0;
-                for k in 0..N {
-                    sigma_ij += w_col[k][i] * self.d[k] * w_col[k][j];
-                }
-                u_new[(i, j)] = sigma_ij * inv_sigma;
-
-                // W の i 行を更新: W[i,k] -= U_new[i,j] · W[j,k]
-                let u_ij = u_new[(i, j)];
-                for k in 0..N {
-                    w_col[k][i] -= u_ij * w_col[k][j];
-                }
-            }
-        }
-
-        self.u = u_new;
-        self.d = d_new;
     }
 
     /// 対称正定値行列を UD 分解（リセット時のみ使用）
@@ -389,36 +332,57 @@ impl ImuEkf {
         }
     }
 
-    /// 加速度計による観測更新（Bierman版）
+    /// 加速度計による観測更新
     fn update_accel(&mut self, ax: f32, ay: f32, az: f32) {
         let a_meas = Vector3::new(ax, ay, az);
+        let g_body = self.gravity_in_body();
 
-        // 3軸を順次スカラー観測として処理（各軸で線形化点を更新）
-        for axis in 0..3 {
-            let g_body = self.gravity_in_body();
-            let g_skew = skew_symmetric(&g_body);
+        // イノベーション
+        let y = a_meas - g_body;
 
-            let y = a_meas[axis] - g_body[axis];
-
-            // h = [g_skew の axis 行, 0, 0, 0]
-            let mut h = StateVector6::zeros();
+        // 観測ヤコビアン H (3×6)
+        let g_skew = skew_symmetric(&g_body);
+        let mut h = SMatrix::<f32, 3, 6>::zeros();
+        for i in 0..3 {
             for j in 0..3 {
-                h[j] = g_skew[(axis, j)];
+                h[(i, j)] = g_skew[(i, j)];
             }
-
-            let k = self.bierman_update(&h, self.r_accel);
-
-            let dx = k * y;
-            let delta_theta = Vector3::new(dx[0], dx[1], dx[2]);
-            let delta_bias  = Vector3::new(dx[3], dx[4], dx[5]);
-
-            let delta_q = self.small_angle_quaternion(&(delta_theta * 0.5));
-            self.q_ref = self.q_ref * delta_q;
-            self.bias += delta_bias;
         }
+
+        // P行列を復元
+        let p = self.reconstruct_p_matrix();
+
+        // 観測ノイズ R
+        let r = Matrix3::from_diagonal(&Vector3::new(self.r_accel, self.r_accel, self.r_accel));
+
+        // イノベーション共分散 S = H * P * Hᵀ + R
+        let s = h * p * h.transpose() + r;
+
+        // カルマンゲイン K = P * Hᵀ * S⁻¹
+        let s_inv = s
+            .try_inverse()
+            .unwrap_or_else(|| Matrix3::identity() * (1.0 / EPSILON));
+        let k = p * h.transpose() * s_inv;
+
+        // 誤差状態の推定
+        let dx = k * y;
+        let delta_theta = Vector3::new(dx[0], dx[1], dx[2]);
+        let delta_bias = Vector3::new(dx[3], dx[4], dx[5]);
+
+        // 参照状態の更新（乗法的、右から）
+        let delta_q = self.small_angle_quaternion(&(delta_theta * 0.5));
+        self.q_ref = self.q_ref * delta_q;
+        self.bias += delta_bias;
+
+        // 共分散更新（Joseph形式）
+        let i_kh = SMatrix::<f32, 6, 6>::identity() - k * h;
+        let p_new = i_kh * p * i_kh.transpose() + k * r * k.transpose();
+
+        // P_new を UD分解
+        self.factor_ud(&p_new);
     }
 
-    /// Yaw角のみを磁場から観測更新（Bierman版）
+    /// Yaw角のみを磁場から観測更新
     pub fn update_mag_yaw(&mut self, mx: f32, my: f32, mz: f32) {
         let (roll, pitch, yaw_predicted) = self.q_ref.euler_angles();
 
@@ -442,101 +406,44 @@ impl ImuEkf {
             y += 2.0 * PI;
         }
 
-        // 観測ベクトル h
+        // 観測ベクトル h (1×6)
         let rot = self.q_ref.to_rotation_matrix();
         let r_row2 = rot.matrix().row(2);
 
-        let mut h = StateVector6::zeros();
-        h[0] = r_row2[0];
-        h[1] = r_row2[1];
-        h[2] = r_row2[2];
+        let mut h = SMatrix::<f32, 1, 6>::zeros();
+        h[(0, 0)] = r_row2[0];
+        h[(0, 1)] = r_row2[1];
+        h[(0, 2)] = r_row2[2];
 
-        // Bierman 更新
-        let k = self.bierman_update(&h, self.r_mag);
+        // P行列を復元
+        let p = self.reconstruct_p_matrix();
 
-        // 誤差状態の更新
+        // S = H * P * Hᵀ + R (スカラー)
+        let hp = h * p;
+        let s = (hp * h.transpose())[(0, 0)] + self.r_mag;
+
+        if s.abs() < EPSILON {
+            return;
+        }
+
+        // K = P * Hᵀ / S (6×1)
+        let k = p * h.transpose() / s;
+
+        // 誤差状態の推定
         let dx = k * y;
-        let delta_theta = Vector3::new(dx[0], dx[1], dx[2]);
-        let delta_bias = Vector3::new(dx[3], dx[4], dx[5]);
+        let delta_theta = Vector3::new(dx[(0, 0)], dx[(1, 0)], dx[(2, 0)]);
+        let delta_bias = Vector3::new(dx[(3, 0)], dx[(4, 0)], dx[(5, 0)]);
 
         let delta_q = self.small_angle_quaternion(&(delta_theta * 0.5));
         self.q_ref = self.q_ref * delta_q;
         self.bias += delta_bias;
-    }
 
-    /// Bierman 観測更新アルゴリズム (Gemini修正版)
-    ///
-    /// 参考: Grewal & Andrews, "Kalman Filtering" (Bierman UD Measurement Update)
-    fn bierman_update(&mut self, h: &StateVector6, r: f32) -> StateVector6 {
-        const N: usize = 6;
+        // 共分散更新（Joseph形式）
+        let i_kh = SMatrix::<f32, 6, 6>::identity() - k * h;
+        let p_new = i_kh * p * i_kh.transpose() + k * self.r_mag * k.transpose();
 
-        // 1. f = Uᵀ · h
-        // Uは上三角なので、i <= j の範囲で計算
-        let mut f = StateVector6::zeros();
-        for j in 0..N {
-            f[j] = h[j];
-            for i in 0..j {
-                f[j] += self.u[(i, j)] * h[i];
-            }
-        }
-
-        // 2. g = D · f
-        let mut g = StateVector6::zeros();
-        for j in 0..N {
-            g[j] = self.d[j] * f[j];
-        }
-
-        // 3. ループによる U, D, K の更新
-        // Bierman法は j=0 から N-1 へ向かって処理します
-        let mut k = StateVector6::zeros(); // カルマンゲイン(未スケーリング)の蓄積用
-        let mut alpha = r;                 // 分散の蓄積
-
-        for j in 0..N {
-            let alpha_prev = alpha;
-            let f_j = f[j];
-            let g_j = g[j];
-
-            // α_new = α_prev + f_j * g_j
-            alpha += f_j * g_j;
-
-            let d_old = self.d[j];
-
-            // Dの更新: D_new = D_old * (α_prev / α_new)
-            // (alphaが小さすぎる場合のゼロ除算ガード)
-            if alpha.abs() > EPSILON {
-                self.d[j] = d_old * alpha_prev / alpha;
-            }
-
-            // U と K の更新
-            // λ = -f_j / α_prev
-            let lambda = if alpha_prev.abs() > EPSILON {
-                -f_j / alpha_prev
-            } else {
-                0.0
-            };
-
-            // Uのj列目 (i < j) を更新
-            // U_new_col_j = U_old_col_j + λ * K_prev
-            // K_new       = K_prev      + g_j * U_old_col_j
-            for i in 0..j {
-                let u_ij_old = self.u[(i, j)];
-
-                self.u[(i, j)] = u_ij_old + lambda * k[i];
-                k[i] += g_j * u_ij_old;
-            }
-            // Kの現在の要素 (i=j) に g_j を加算 (U_jjは常に1なので)
-            k[j] += g_j;
-        }
-
-        // 4. 最終的なカルマンゲインのスケーリング
-        // K = K_unscaled / alpha_final
-        if alpha.abs() > EPSILON {
-            k /= alpha;
-        } else {
-            return StateVector6::zeros();
-        }
-
-        k
+        // P_new を UD分解
+        self.factor_ud(&p_new);
     }
 
     /// 小角度近似によるクォータニオン生成

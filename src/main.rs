@@ -38,7 +38,7 @@ use embedded_graphics::{
 };
 use embedded_hal_bus::i2c::{RefCellDevice as I2cRefCellDevice};
 use atom::{atom_motion, ina226, bmi270, bmm150, lp5562};
-use control::{fb::{pid, smc}, ff::{gravity, pos_regulator}, util::{imu_mekf_ud, imu_mekf_p, deadzone, mag_calibration, mag_ets, mag_rls}};
+use control::{fb::{pid, smc}, ff::{gravity, pos_regulator}, util::{imu_mekf, deadzone, mag_calibration, mag_ets, mag_rls}};
 use mipidsi_async::{
     Builder, 
     models::{GC9107, ST7789}, 
@@ -305,22 +305,13 @@ fn main() -> ! {
     // オンライン地磁気キャリブレーション
     let mut rls = mag_rls::MagOnlineRls::new(&mag_calib);
 
-    let mut ekf_p = imu_mekf_p::ImuEkf::new(
-        imu_mekf_p::EkfConfig {
+    let mut ekf = imu_mekf::ImuEkf::new(
+        imu_mekf::EkfConfig {
             dt: DT,
             gyro_noise: 0.05,
             gyro_bias_noise: 0.0005,
             accel_noise: 0.15,
-            mag_noise: 0.5,
-            ..Default::default()
-    });
-    let mut ekf_ud = imu_mekf_ud::ImuEkf::new(
-        imu_mekf_ud::EkfConfig {
-            dt: DT,
-            gyro_noise: 0.05,
-            gyro_bias_noise: 0.0005,
-            accel_noise: 0.15,
-            mag_noise: 0.5,
+            mag_noise: 1.0,
             ..Default::default()
     });
 
@@ -400,9 +391,8 @@ fn main() -> ! {
                         // 物理的X-up状態 → 計算用Z-up座標系への変換で
                         // すべて、(x,y,z) => (z,-y,x)に変換しているので注意
                         let (ax, ay, az) = (d.accel.z, -d.accel.y, d.accel.x);
-                        let (gx, gy, gz) = imu_mekf_ud::degree_to_rad((d.gyro.z, -d.gyro.y, d.gyro.x));
-                        let state_p = ekf_p.update(ax, ay, az, gx, gy, gz);
-                        let state_ud = ekf_ud.update(ax, ay, az, gx, gy, gz);
+                        let (gx, gy, gz) = imu_mekf::degree_to_rad((d.gyro.z, -d.gyro.y, d.gyro.x));
+                        let state = ekf.update(ax, ay, az, gx, gy, gz);
                         
                         let mag_raw = d.mag.unwrap();
                         if counter % RLS_DIV == 0 {
@@ -412,27 +402,13 @@ fn main() -> ! {
                         let mag_bmi_axis = [mag[1], mag[0], -mag[2]];
                         let (mx, my, mz) = (mag_bmi_axis[2], -mag_bmi_axis[1], mag_bmi_axis[0]); 
                         if counter % MAG_DIV == 0 {
-                            ekf_p.update_mag_yaw(mx, my, mz);
-                            ekf_ud.update_mag_yaw(mx, my, mz);
+                            ekf.update_mag_yaw(mx, my, mz);
                         }
                         if counter % PRINT_DIV == 0 {
-                            defmt::info!(
-                                "Diff [mdeg]: r={}, p={}, y={}",
-                                (state_p.roll - state_ud.roll) * 57295.8,  // milli-degrees
-                                (state_p.pitch - state_ud.pitch) * 57295.8,
-                                (state_p.yaw - state_ud.yaw) * 57295.8
-                            );
-
-                            // 分散の比較
-                            let var_p = ekf_p.get_variances();
-                            let var_ud = ekf_ud.get_variances();
-                            defmt::info!("Var P:  {:?}", var_p);
-                            defmt::info!("Var UD: {:?}", var_ud);
                             // info!("a={}, {}, {}", ax, ay, az);
                             // info!("g={}, {}, {}", gx, gy, gz);
                             // info!("m=({},{},{})", mc, my, mz);
-                            info!("p: r={}, {}, {}", state_p.roll, state_p.pitch, state_p.yaw);
-                            info!("ud: r={}, {}, {}", state_ud.roll, state_ud.pitch, state_ud.yaw);
+                            info!("r={}, {}, {}", state.roll, state.pitch, state.yaw);
                         }
                         counter += 1;
 
@@ -440,8 +416,6 @@ fn main() -> ! {
                             drive = !drive;
                         }
                         button_state = button.is_low();
-
-                        let state = state_p;
 
                         if state.roll.abs() > 1.0 || state.pitch.abs() > 1.0 {
                             drive = false;
@@ -472,8 +446,7 @@ fn main() -> ! {
                             smc.reset();
                             yaw_pid.reset();
                             pos_regulator.reset();
-                            ekf_p.reset_yaw();
-                            ekf_ud.reset_yaw();
+                            ekf.reset_yaw();
                         }
                         let _ = motion.set_motor(atom_motion::MotorChannel::M1, m1_pwm);
                         let _ = motion.set_motor(atom_motion::MotorChannel::M2, m2_pwm);
