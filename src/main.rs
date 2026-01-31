@@ -38,7 +38,7 @@ use embedded_graphics::{
 };
 use embedded_hal_bus::i2c::{RefCellDevice as I2cRefCellDevice};
 use atom::{atom_motion, ina226, bmi270, bmm150, lp5562};
-use control::{fb::{pid, smc}, ff::{gravity, pos_regulator}, util::{imu_mekf, deadzone, mag_calibration, mag_ets, mag_rls}};
+use control::{fb::{pid, smc}, ff::{gravity, pos_regulator, dkf}, util::{imu_mekf, deadzone, mag_calibration, mag_ets, mag_rls}};
 use mipidsi_async::{
     Builder, 
     models::{GC9107, ST7789}, 
@@ -59,6 +59,12 @@ const FREQUENCY: u32 = 500;
 const PERIOD_US: u64 = 1_000_000 / FREQUENCY as u64;
 const DT: f32 = 1.0 / FREQUENCY as f32;
 const U_MAX: f32 = 300.0;
+/// PWM → トルク変換係数 [Nm/PWM]
+const PWM_TO_TORQUE: f32 = 1.0 / 5000.0;
+/// トルク → PWM変換係数 [PWM/Nm]
+const TORQUE_TO_PWM: f32 = 5000.0;
+/// ピッチオフセット [rad]（重心バランス点）
+const PITCH_OFFSET: f32 = 0.125;
 
 const MOTION_DIV: u32 = 1;
 const DISPLAY_DIV: u32 = 10;
@@ -315,6 +321,17 @@ fn main() -> ! {
             ..Default::default()
     });
 
+    let mut dkf = dkf::Dkf::new(dkf::DkfConfig {
+        dt: DT,
+        inertia: 0.002,
+        mgl: 0.1 * 9.81 * 0.035,  // ≈ 0.034 Nm
+        q_omega: 0.1,
+        q_disturbance: 1e-5,     // 調整ポイント: 大きくすると追従速く、小さくすると滑らか
+        r_gyro: 0.001,
+        disturbance_limit: 0.05,    // ±0.1 Nm（最大重力トルクの3倍程度）
+        ..Default::default()
+    });
+
     let i2c1 = I2c::new(peripherals.I2C1, 
         I2cConfig::default()
             .with_frequency(Rate::from_khz(400))
@@ -341,7 +358,7 @@ fn main() -> ! {
     // ラムダ(P)上げ過ぎると発散する
     // アルファ(I)外乱が大きいほど高くしないといけない
     // C(D)上げ過ぎると発振する
-    let mut smc = smc::SuperTwistingSMC::new(DT, 200.0, 1000.0, 25.0)
+    let mut smc = smc::SuperTwistingSMC::new(DT, 200.0, 500.0, 25.0)
         .with_smoothing(0.01)
         .with_v_regulation(U_MAX * 0.8);
 
@@ -422,14 +439,20 @@ fn main() -> ! {
                         }
 
                         if drive {
-                            let now_angle = state.pitch + 0.125;
-                            let e = target_angle - now_angle;
-                            let e_dot = 0.0 - gy;
-                            let fb = smc.update(e, e_dot);
-                            let ff = -gravity.update(now_angle);
-                            let atom_max = atom_motion::MOTOR_SPEED_MAX as f32;
-                            let base_out = deadzone::apply_deadzone(fb + ff, U_MAX, 30.0, atom_max); //(限界-5)程度にするのが最適っぽいな
+                            let now_angle = state.pitch + PITCH_OFFSET;
+                            let pitch_rate = state.pitch_rate;
+                            let dkf_state = dkf.update(now_angle, pitch_rate);
 
+                            let e = target_angle - now_angle;
+                            let e_dot = 0.0 - state.pitch_rate;
+                            let fb = smc.update(e, e_dot);
+                            let ff_gravity = -gravity.update(now_angle);
+                            let ff_disturbance = -dkf_state.disturbance * TORQUE_TO_PWM;
+                            let atom_max = atom_motion::MOTOR_SPEED_MAX as f32;
+                            let total_output = fb + ff_gravity + ff_disturbance;
+                            let base_out = deadzone::apply_deadzone(total_output, U_MAX, 30.0, atom_max); //(限界-5)程度にするのが最適っぽいな
+
+                            // Yaw制御
                             let yaw_e = 0.0 - state.continuous_yaw;
                             let yaw_e_dot = 0.0 - gz;
                             let yaw_result = yaw_pid.update_with_d(yaw_e, yaw_e_dot);
@@ -439,7 +462,16 @@ fn main() -> ! {
                             m1_pwm = (-base_out + yaw_out).clamp(-atom_max, atom_max) as i8;
                             m2_pwm = (base_out + yaw_out).clamp(-atom_max, atom_max) as i8;
 
+                            let tau_control = -base_out * (U_MAX / atom_max) * PWM_TO_TORQUE;
+                            dkf.set_control_torque(tau_control);
+
                             target_angle = 0.0 - pos_regulator.update(base_out);
+
+                            if counter % PRINT_DIV == 0 {
+                                let tau_ctrl = -base_out * (U_MAX / atom_max) * PWM_TO_TORQUE;
+                                info!("tau_ctrl={}, d={}, innov={}",
+                                    tau_ctrl, dkf_state.disturbance, dkf_state.innovation);
+                            }
                         } else {
                             m1_pwm = 0;
                             m2_pwm = 0;
@@ -447,6 +479,7 @@ fn main() -> ! {
                             yaw_pid.reset();
                             pos_regulator.reset();
                             ekf.reset_yaw();
+                            dkf.reset();
                         }
                         let _ = motion.set_motor(atom_motion::MotorChannel::M1, m1_pwm);
                         let _ = motion.set_motor(atom_motion::MotorChannel::M2, m2_pwm);
