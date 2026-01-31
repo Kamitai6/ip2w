@@ -38,7 +38,7 @@ use embedded_graphics::{
 };
 use embedded_hal_bus::i2c::{RefCellDevice as I2cRefCellDevice};
 use atom::{atom_motion, ina226, bmi270, bmm150, lp5562};
-use control::{fb::{pid, smc}, ff::{gravity, pos_regulator, dkf}, util::{imu_mekf, deadzone, mag_calibration, mag_ets, mag_rls}};
+use control::{fb::{pid, smc}, ff::{gravity, pos_regulator, dkf}, util::{imu_mekf, deadzone, mag_calibration, mag_ets, mag_rls, lpf}};
 use mipidsi_async::{
     Builder, 
     models::{GC9107, ST7789}, 
@@ -311,13 +311,17 @@ fn main() -> ! {
     // オンライン地磁気キャリブレーション
     let mut rls = mag_rls::MagOnlineRls::new(&mag_calib);
 
+    let mut lpf_accel = lpf::Lpf3::new(40.0, DT);   // 加速度: fc=40Hz（モーター振動除去）
+    let mut lpf_gyro  = lpf::Lpf3::new(80.0, DT);   // ジャイロ: fc=80Hz（高周波ノイズ除去）
+    let mut lpf_mag   = lpf::Lpf3::new(2.0,  DT);   // 磁力計: fc=2Hz（yawブレ抑制）
+
     let mut ekf = imu_mekf::ImuEkf::new(
         imu_mekf::EkfConfig {
             dt: DT,
             gyro_noise: 0.05,
-            gyro_bias_noise: 0.0005,
+            gyro_bias_noise: 0.001,
             accel_noise: 0.15,
-            mag_noise: 1.0,
+            mag_noise: 0.3,
             ..Default::default()
     });
 
@@ -409,6 +413,8 @@ fn main() -> ! {
                         // すべて、(x,y,z) => (z,-y,x)に変換しているので注意
                         let (ax, ay, az) = (d.accel.z, -d.accel.y, d.accel.x);
                         let (gx, gy, gz) = imu_mekf::degree_to_rad((d.gyro.z, -d.gyro.y, d.gyro.x));
+                        let (ax, ay, az) = lpf_accel.update(ax, ay, az);
+                        let (gx, gy, gz) = lpf_gyro.update(gx, gy, gz);
                         let state = ekf.update(ax, ay, az, gx, gy, gz);
                         
                         let mag_raw = d.mag.unwrap();
@@ -417,9 +423,10 @@ fn main() -> ! {
                         }
                         let mag = rls.apply([mag_raw.x, mag_raw.y, mag_raw.z]);
                         let mag_bmi_axis = [mag[1], mag[0], -mag[2]];
-                        let (mx, my, mz) = (mag_bmi_axis[2], -mag_bmi_axis[1], mag_bmi_axis[0]); 
+                        let (mx, my, mz) = (mag_bmi_axis[2], -mag_bmi_axis[1], mag_bmi_axis[0]);
+                        let (mx, my, mz) = lpf_mag.update(mx, my, mz);
                         if counter % MAG_DIV == 0 {
-                            ekf.update_mag_yaw(mx, my, mz);
+                            // ekf.update_mag_yaw(mx, my, mz);
                         }
                         if counter % PRINT_DIV == 0 {
                             // info!("a={}, {}, {}", ax, ay, az);
