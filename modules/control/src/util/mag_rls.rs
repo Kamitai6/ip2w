@@ -89,11 +89,11 @@ pub struct MagOnlineRls {
 impl MagOnlineRls {
     /// MagCalibration から初期化
     pub fn new(calib: &MagCalibration) -> Self {
-        Self::with_params(calib, RlsParams::default())
+        Self::new_with_params(calib, RlsParams::default())
     }
 
     /// パラメータを指定して初期化
-    pub fn with_params(calib: &MagCalibration, params: RlsParams) -> Self {
+    pub fn new_with_params(calib: &MagCalibration, params: RlsParams) -> Self {
         let transform = *calib.transform_matrix();
         let q_matrix = calib.q_matrix();
 
@@ -161,7 +161,7 @@ impl MagOnlineRls {
         let error = 1.0 - norm_sq;
 
         // φ = 2 Q (m - b)
-        let phi = 2.0 * self.q_matrix * diff;
+        let phi = -2.0 * self.q_matrix * diff;
 
         // RLS ゲイン: K = P φ / (λ + φᵀ P φ)
         let p_phi = self.p_matrix * phi;

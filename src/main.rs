@@ -311,9 +311,9 @@ fn main() -> ! {
     // オンライン地磁気キャリブレーション
     let mut rls = mag_rls::MagOnlineRls::new(&mag_calib);
 
-    let mut lpf_accel = lpf::Lpf3::new(40.0, DT);   // 加速度: fc=40Hz（モーター振動除去）
-    let mut lpf_gyro  = lpf::Lpf3::new(80.0, DT);   // ジャイロ: fc=80Hz（高周波ノイズ除去）
-    let mut lpf_mag   = lpf::Lpf3::new(2.0,  DT);   // 磁力計: fc=2Hz（yawブレ抑制）
+    let mut lpf_accel = lpf::Lpf3::new(50.0, DT); // Hz
+    let mut lpf_gyro  = lpf::Lpf3::new(100.0, DT);
+    let mut lpf_mag   = lpf::Lpf3::new(5.0,  DT);
 
     let mut ekf = imu_mekf::ImuEkf::new(
         imu_mekf::EkfConfig {
@@ -426,7 +426,7 @@ fn main() -> ! {
                         let (mx, my, mz) = (mag_bmi_axis[2], -mag_bmi_axis[1], mag_bmi_axis[0]);
                         let (mx, my, mz) = lpf_mag.update(mx, my, mz);
                         if counter % MAG_DIV == 0 {
-                            // ekf.update_mag_yaw(mx, my, mz);
+                            ekf.update_mag_yaw(mx, my, mz);
                         }
                         if counter % PRINT_DIV == 0 {
                             // info!("a={}, {}, {}", ax, ay, az);
