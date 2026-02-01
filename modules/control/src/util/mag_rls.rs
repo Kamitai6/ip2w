@@ -161,7 +161,7 @@ impl MagOnlineRls {
         let error = 1.0 - norm_sq;
 
         // φ = 2 Q (m - b)
-        let phi = -2.0 * self.q_matrix * diff;
+        let phi = 2.0 * self.q_matrix * diff;
 
         // RLS ゲイン: K = P φ / (λ + φᵀ P φ)
         let p_phi = self.p_matrix * phi;

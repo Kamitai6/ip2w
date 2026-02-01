@@ -92,6 +92,7 @@ fn main() -> ! {
     // wdt0.disable();
     // let mut wdt1 = timg1.wdt;
     // wdt1.disable();
+    info!("init start");
 
     let button = Input::new(peripherals.GPIO41, InputConfig::default().with_pull(Pull::Up));
 
@@ -110,6 +111,7 @@ fn main() -> ! {
     lp5562.init(&mut |us| delay.delay_micros(us)).unwrap();
     lp5562.set_current(lp5562::Channel::White, 255).unwrap();
     lp5562.set_pwm(lp5562::Channel::White, 255).unwrap(); // 白色点灯
+    info!("lp5562 ok");
 
     let lcd_spi = Spi::new(
             peripherals.SPI2,
@@ -154,6 +156,8 @@ fn main() -> ! {
             .init(&mut delay, &raw mut DISPLAY_FB_A, &raw mut DISPLAY_FB_B)
             .unwrap()
     };
+
+    info!("display ok");
 
     // Initialize IMU
     let mut imu = bmi270::Bmi270::new(I2cRefCellDevice::new(&i2c0_ref_cell))
@@ -335,6 +339,7 @@ fn main() -> ! {
         disturbance_limit: 0.05,    // ±0.1 Nm（最大重力トルクの3倍程度）
         ..Default::default()
     });
+    info!("imu ok");
 
     let i2c1 = I2c::new(peripherals.I2C1, 
         I2cConfig::default()
@@ -362,15 +367,17 @@ fn main() -> ! {
     // ラムダ(P)上げ過ぎると発散する
     // アルファ(I)外乱が大きいほど高くしないといけない
     // C(D)上げ過ぎると発振する
-    let mut smc = smc::SuperTwistingSMC::new(DT, 200.0, 500.0, 25.0)
+    let mut smc = smc::SuperTwistingSMC::new(DT, 200.0, 100.0, 25.0)
         .with_smoothing(0.01)
         .with_v_regulation(U_MAX * 0.8);
 
     let mut gravity = gravity::GravityCompensator::new(0.1, 0.035, 5000.0);
-    let mut pos_regulator = pos_regulator::PositionRegulator::new(DT, 100.0, 0.1)
-        .with_lead(0.001)
-        .with_max(45.0, 5.0)
-        .with_lowpass(5.0);
+    let mut pos_regulator = pos_regulator::PositionRegulator::new(DT, 1000.0, 0.05) // sec sec rad
+        .with_max(100.0, 10.0)
+        // .with_lowpass(5.0)
+        // .with_washout(5.0)
+        .with_decay(10.0, 1000.0)
+        ;
 
     let mut yaw_pid = pid::PID::new(DT, 10.0, 0.0, 20.0);
     
@@ -472,7 +479,7 @@ fn main() -> ! {
                             let tau_control = -base_out * (U_MAX / atom_max) * PWM_TO_TORQUE;
                             dkf.set_control_torque(tau_control);
 
-                            target_angle = 0.0 - pos_regulator.update(base_out);
+                            target_angle = 0.0 - pos_regulator.update(total_output);
 
                             if counter % PRINT_DIV == 0 {
                                 let tau_ctrl = -base_out * (U_MAX / atom_max) * PWM_TO_TORQUE;
