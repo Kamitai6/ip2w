@@ -38,7 +38,7 @@ use embedded_graphics::{
 };
 use embedded_hal_bus::i2c::{RefCellDevice as I2cRefCellDevice};
 use atom::{atom_motion, ina226, bmi270, bmm150, lp5562};
-use control::{fb::{pid, smc}, ff::{gravity, pos_regulator, dkf}, util::{imu_mekf, deadzone, mag_calibration, mag_ets, mag_rls, lpf}};
+use control::{fb::{pid, smc}, ff::{gravity, pos_regulator, dkf, pos_ekf}, util::{imu_mekf, deadzone, mag_calibration, mag_ets, mag_rls, lpf}};
 use mipidsi_async::{
     Builder, 
     models::{GC9107, ST7789}, 
@@ -372,12 +372,19 @@ fn main() -> ! {
         .with_v_regulation(U_MAX * 0.8);
 
     let mut gravity = gravity::GravityCompensator::new(0.1, 0.035, 5000.0);
-    let mut pos_regulator = pos_regulator::PositionRegulator::new(DT, 1000.0, 0.05) // sec sec rad
-        .with_max(100.0, 10.0)
-        // .with_lowpass(5.0)
-        // .with_washout(5.0)
-        .with_decay(10.0, 1000.0)
-        ;
+    // let mut pos_regulator = pos_regulator::PositionRegulator::new(DT, 1000.0, 0.05) // sec sec rad
+    //     .with_max(100.0, 10.0)
+    //     // .with_lowpass(5.0)
+    //     // .with_washout(5.0)
+    //     .with_decay(10.0, 1000.0)
+    //     ;
+    let mut pos_ekf = pos_ekf::PositionEkf::new(pos_ekf::PosEkfConfig {
+        dt: DT,
+        k_cmd: 0.003,      // 調整ポイント①
+        r_accel: 1.0,       // 調整ポイント②（下げると加速度計を信頼）
+        max_output: 0.05,
+        ..Default::default()
+    });
 
     let mut yaw_pid = pid::PID::new(DT, 10.0, 0.0, 20.0);
     
@@ -433,13 +440,15 @@ fn main() -> ! {
                         let (mx, my, mz) = (mag_bmi_axis[2], -mag_bmi_axis[1], mag_bmi_axis[0]);
                         let (mx, my, mz) = lpf_mag.update(mx, my, mz);
                         if counter % MAG_DIV == 0 {
-                            ekf.update_mag_yaw(mx, my, mz);
+                            // ekf.update_mag_yaw(mx, my, mz);
                         }
                         if counter % PRINT_DIV == 0 {
-                            // info!("a={}, {}, {}", ax, ay, az);
+                            info!("a={}, {}, {}", ax, ay, az);
                             // info!("g={}, {}, {}", gx, gy, gz);
                             // info!("m=({},{},{})", mc, my, mz);
                             info!("r={}, {}, {}", state.roll, state.pitch, state.yaw);
+                            info!("sin=({})", libm::sinf(state.pitch));
+                            info!("m=({})", ax + libm::sinf(state.pitch));
                         }
                         counter += 1;
 
@@ -479,19 +488,21 @@ fn main() -> ! {
                             let tau_control = -base_out * (U_MAX / atom_max) * PWM_TO_TORQUE;
                             dkf.set_control_torque(tau_control);
 
-                            target_angle = 0.0 - pos_regulator.update(total_output);
+                            // target_angle = 0.0 - pos_regulator.update(total_output);
+                            target_angle = 0.0 - pos_ekf.update(total_output, ax, now_angle);
 
                             if counter % PRINT_DIV == 0 {
-                                let tau_ctrl = -base_out * (U_MAX / atom_max) * PWM_TO_TORQUE;
-                                info!("tau_ctrl={}, d={}, innov={}",
-                                    tau_ctrl, dkf_state.disturbance, dkf_state.innovation);
+                                let ps = pos_ekf.state();
+                                // info!("pos: v={}, x={}, bias={}, innov={}",
+                                //     ps.velocity, ps.position, ps.a_bias, ps.innovation);
                             }
                         } else {
                             m1_pwm = 0;
                             m2_pwm = 0;
                             smc.reset();
                             yaw_pid.reset();
-                            pos_regulator.reset();
+                            // pos_regulator.reset();
+                            pos_ekf.reset();
                             ekf.reset_yaw();
                             dkf.reset();
                         }
