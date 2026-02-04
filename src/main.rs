@@ -380,8 +380,13 @@ fn main() -> ! {
     //     ;
     let mut pos_ekf = pos_ekf::PositionEkf::new(pos_ekf::PosEkfConfig {
         dt: DT,
-        k_cmd: 0.003,      // 調整ポイント①
-        r_accel: 1.0,       // 調整ポイント②（下げると加速度計を信頼）
+        k_cmd: 2.0 / (TORQUE_TO_PWM * 0.03 * 0.1) * 0.05,
+        q_v: 1e-3,
+        // q_bias: 0.0, 
+        q_bias: 1e-6, 
+        r_accel: 0.05,
+        k_pos: 0.5,
+        k_vel: 0.5,
         max_output: 0.05,
         ..Default::default()
     });
@@ -443,12 +448,11 @@ fn main() -> ! {
                             // ekf.update_mag_yaw(mx, my, mz);
                         }
                         if counter % PRINT_DIV == 0 {
-                            info!("a={}, {}, {}", ax, ay, az);
+                            // info!("a={}, {}, {}", ax, ay, az);
                             // info!("g={}, {}, {}", gx, gy, gz);
                             // info!("m=({},{},{})", mc, my, mz);
-                            info!("r={}, {}, {}", state.roll, state.pitch, state.yaw);
-                            info!("sin=({})", libm::sinf(state.pitch));
-                            info!("m=({})", ax + libm::sinf(state.pitch));
+                            // info!("r={}, {}, {}", state.roll, state.pitch, state.yaw);
+                            // info!("g={}", ax + libm::sinf(state.pitch));
                         }
                         counter += 1;
 
@@ -472,7 +476,7 @@ fn main() -> ! {
                             let ff_gravity = -gravity.update(now_angle);
                             let ff_disturbance = -dkf_state.disturbance * TORQUE_TO_PWM;
                             let atom_max = atom_motion::MOTOR_SPEED_MAX as f32;
-                            let total_output = fb + ff_gravity + ff_disturbance;
+                            let total_output = 0.0;fb + ff_gravity + ff_disturbance;
                             let base_out = deadzone::apply_deadzone(total_output, U_MAX, 30.0, atom_max); //(限界-5)程度にするのが最適っぽいな
 
                             // Yaw制御
@@ -489,12 +493,14 @@ fn main() -> ! {
                             dkf.set_control_torque(tau_control);
 
                             // target_angle = 0.0 - pos_regulator.update(total_output);
-                            target_angle = 0.0 - pos_ekf.update(total_output, ax, now_angle);
+                            target_angle = 0.0 - pos_ekf.update(total_output, ax, state.pitch);
 
                             if counter % PRINT_DIV == 0 {
                                 let ps = pos_ekf.state();
-                                // info!("pos: v={}, x={}, bias={}, innov={}",
-                                //     ps.velocity, ps.position, ps.a_bias, ps.innovation);
+                                info!("pos: v={}, x={}, bias={}, innov={}, command={}",
+                                    ps.velocity, ps.position, ps.g_bias, ps.innovation, total_output);
+                                // info!("accel_term={}, cmd_term={}",
+                                //     -(ax + libm::sinf(state.pitch)) * 9.81, total_output * (2.0 / (TORQUE_TO_PWM * 0.03 * 0.1)) * 0.05);
                             }
                         } else {
                             m1_pwm = 0;
