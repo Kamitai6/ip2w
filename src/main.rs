@@ -380,13 +380,34 @@ fn main() -> ! {
     //     ;
     let mut pos_ekf = pos_ekf::PositionEkf::new(pos_ekf::PosEkfConfig {
         dt: DT,
-        k_cmd: 2.0 / (TORQUE_TO_PWM * 0.03 * 0.1) * 0.05,
-        q_v: 1e-3,
-        // q_bias: 0.0, 
-        q_bias: 1e-6, 
-        r_accel: 0.05,
-        k_pos: 0.5,
-        k_vel: 0.5,
+
+        k0: 2.0 / (TORQUE_TO_PWM * 0.03 * 0.1) * 0.05,
+
+        tau_a: 0.02,
+        j_max: 50.0,
+
+        tau_k: 10.0,
+
+        r_accel: 1.0,
+        jerk_r_scale: 2.0,
+
+        q_a: 5e-3,
+        q_v: 1e-5,
+        q_k: 1e-8,
+        u_scale_for_k: 50.0,
+
+        q_b_max: 1e-6,
+        q_b_min: 1e-10,
+
+        tau_b_min: 1.0,
+        tau_b_max: 100.0,
+
+        innov_lpf_alpha: 0.05,
+        flip_lpf_alpha: 0.05,
+        bias_residual_scale: 0.5,
+
+        k_pos: 0.1,
+        k_vel: 0.2,
         max_output: 0.05,
         ..Default::default()
     });
@@ -476,7 +497,7 @@ fn main() -> ! {
                             let ff_gravity = -gravity.update(now_angle);
                             let ff_disturbance = -dkf_state.disturbance * TORQUE_TO_PWM;
                             let atom_max = atom_motion::MOTOR_SPEED_MAX as f32;
-                            let total_output = 0.0;fb + ff_gravity + ff_disturbance;
+                            let total_output = fb + ff_gravity + ff_disturbance;
                             let base_out = deadzone::apply_deadzone(total_output, U_MAX, 30.0, atom_max); //(限界-5)程度にするのが最適っぽいな
 
                             // Yaw制御
@@ -497,8 +518,7 @@ fn main() -> ! {
 
                             if counter % PRINT_DIV == 0 {
                                 let ps = pos_ekf.state();
-                                info!("pos: v={}, x={}, bias={}, innov={}, command={}",
-                                    ps.velocity, ps.position, ps.g_bias, ps.innovation, total_output);
+                                // pos_ekf::log_pos_v3(cfg.dt, cfg.k_pos, cfg.k_vel, cfg.max_output, command, ax_g, pitch, out, &st);
                                 // info!("accel_term={}, cmd_term={}",
                                 //     -(ax + libm::sinf(state.pitch)) * 9.81, total_output * (2.0 / (TORQUE_TO_PWM * 0.03 * 0.1)) * 0.05);
                             }

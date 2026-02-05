@@ -1,44 +1,75 @@
 use libm::{sinf, tanhf};
 
-/// 並進位置推定EKF + レギュレータ（v1: 観測側バイアス）
+/// 並進位置推定EKF + レギュレータ（v3: trust連続制御 + k0回帰 + joseph更新）
 ///
-/// コマンド積分（高帯域）と加速度計観測（低帯域）を融合して
-/// 並進速度・位置・重力バイアスを推定する。
+/// 状態: [v, x, a, b, k]
+///   v:  並進速度 [m/s]
+///   x:  並進位置 [m]
+///   a:  真の並進加速度（内部状態） [m/s^2]
+///   b:  観測側合成バイアス（重力漏れ/加速度計バイアス等をまとめる） [m/s^2]
+///   k:  command→加速度係数 推定値 [m/s^2 / PWM]
 ///
-/// 【v1での変更】
-/// バイアスを「観測側の重力リーク」として推定し、
-/// 予測側（コマンド積分）には影響させない。
+/// 観測:
+///   z = a_meas = -(ax_g + sin(pitch)) * 9.81
+///   h = a + b
+///   H = [0, 0, 1, 1, 0]
 ///
-/// 状態: [v, x, g_bias]
-///   v:      並進速度 [m/s]
-///   x:      並進位置 [m]
-///   g_bias: 観測側重力バイアス [m/s²]
-///           （姿勢推定誤差・加速度計バイアスによる重力リーク）
-///
-/// プロセスモデル:
-///   v += k_cmd · command · dt     ← バイアスは含まない
-///   x += v · dt
-///   g_bias ~ random walk
-///
-/// 観測モデル (H = [0, 0, +1]):
-///   z = -(ax_g + sin(pitch)) · 9.81  [m/s²]（加速度計観測）
-///   h = k_cmd · command + g_bias      [m/s²]（予測 + バイアス）
-///   innovation = z - h = z - k_cmd · command - g_bias
-
+/// 重要:
+///   - b は固定強リークしない。信頼度(trust)で「リーク量」と「追従性(Qb)」を連続制御。
+///   - k はユーザ指定の k0(=cfg.k0) へ戻るリーク（平均回帰）を入れる。
+///   - あり得ない jerk（観測の形）→ Rを増やしてIMU観測を弱める（連続的）。
+///   - 残差の“持続”と“符号反転の多さ”で b の信頼度を作る（イベントではない）。
 pub struct PosEkfConfig {
     pub dt: f32,
 
-    /// コマンド → 並進加速度の変換係数 [m/s² / PWM]
-    pub k_cmd: f32,
+    /// k の公称値（ユーザが決める） [m/s^2 / PWM]
+    pub k0: f32,
 
-    /// 速度プロセスノイズ [m²/s³]
+    /// a が k*command に追従する時定数 [s]
+    pub tau_a: f32,
+
+    /// a の jerk 上限（状態更新のクリップ） [m/s^3]
+    pub j_max: f32,
+
+    /// k を k0 に戻す時定数 [s]
+    pub tau_k: f32,
+
+    /// 観測ノイズ（ベース） [m^2/s^4]
+    pub r_accel: f32,
+
+    /// jerkでRを膨らませる強さ（0以上）
+    pub jerk_r_scale: f32,
+
+    /// a のプロセスノイズ（モデル誤差吸収） [m^2/s^5] 相当
+    pub q_a: f32,
+
+    /// v のプロセスノイズ（保険） [m^2/s^3]
     pub q_v: f32,
 
-    /// バイアスランダムウォーク [m²/s⁵]
-    pub q_bias: f32,
+    /// k のプロセスノイズ（励起があるときだけ効かせる想定） [(m/s^2/PWM)^2 / s]
+    pub q_k: f32,
 
-    /// 加速度計観測ノイズ [m²/s⁴]
-    pub r_accel: f32,
+    /// k の励起判定スケール（du/(du+u_scale)）の u_scale [PWM]
+    pub u_scale_for_k: f32,
+
+    /// b のプロセスノイズ上限（trust=1での強さ） [m^2/s^5]
+    pub q_b_max: f32,
+
+    /// b のプロセスノイズ下限（trust=0での下限） [m^2/s^5]
+    pub q_b_min: f32,
+
+    /// b のリーク時定数（trust=0→min, trust=1→max） [s]
+    pub tau_b_min: f32,
+    pub tau_b_max: f32,
+
+    /// 残差LPF（持続判定用） 0..1（大きいほど速い）
+    pub innov_lpf_alpha: f32,
+
+    /// 符号反転LPF（反転が多いほどtrustを下げる） 0..1
+    pub flip_lpf_alpha: f32,
+
+    /// |LPF残差| を 0..1 に正規化するスケール [m/s^2]
+    pub bias_residual_scale: f32,
 
     /// 位置→角度オフセットゲイン [rad/m]
     pub k_pos: f32,
@@ -54,10 +85,32 @@ impl Default for PosEkfConfig {
     fn default() -> Self {
         Self {
             dt: 0.002,
-            k_cmd: 0.003,
-            q_v: 1e-3,
-            q_bias: 1e-6,
+
+            k0: 0.003,
+
+            tau_a: 0.02,
+            j_max: 50.0,
+
+            tau_k: 10.0,
+
             r_accel: 1.0,
+            jerk_r_scale: 2.0,
+
+            q_a: 5e-3,
+            q_v: 1e-5,
+            q_k: 1e-8,
+            u_scale_for_k: 50.0,
+
+            q_b_max: 1e-6,
+            q_b_min: 1e-10,
+
+            tau_b_min: 1.0,
+            tau_b_max: 100.0,
+
+            innov_lpf_alpha: 0.05,
+            flip_lpf_alpha: 0.05,
+            bias_residual_scale: 0.5,
+
             k_pos: 0.1,
             k_vel: 0.2,
             max_output: 0.05,
@@ -70,116 +123,327 @@ impl Default for PosEkfConfig {
 pub struct PosEkfState {
     pub velocity: f32,
     pub position: f32,
-    pub g_bias: f32,
+    pub accel: f32,
+    pub bias: f32,
+    pub k_est: f32,
+
     pub innovation: f32,
+    pub innov_lp: f32,
+    pub trust: f32,
+
+    pub r_eff: f32,
+    pub jerk_meas: f32,
 }
 
 pub struct PositionEkf {
+    // 状態
     v: f32,
     x: f32,
-    g_bias: f32,
-    /// 共分散（3×3対称行列、上三角6要素）
-    /// [P_vv, P_vx, P_vb, P_xx, P_xb, P_bb]
-    p: [f32; 6],
+    a: f32,
+    b: f32,
+    k: f32,
+
+    // 共分散（フル 5x5）
+    p: [[f32; 5]; 5],
+
+    // 連続信頼度
+    trust: f32,
+
+    // 残差履歴
     innovation: f32,
+    innov_lp: f32,
+    prev_innov_lp: f32,
+    flip_lp: f32,
+
+    // 観測履歴
+    prev_a_meas: f32,
+    prev_command: f32,
+
+    // デバッグ
+    r_eff: f32,
+    jerk_meas: f32,
+
     cfg: PosEkfConfig,
 }
 
 impl PositionEkf {
     pub fn new(cfg: PosEkfConfig) -> Self {
+        let mut p = [[0.0f32; 5]; 5];
+        // 初期共分散（雑に安全側）
+        p[0][0] = 0.01;  // v
+        p[1][1] = 0.01;  // x
+        p[2][2] = 0.5;   // a
+        p[3][3] = 0.1;   // b
+        p[4][4] = 1e-6;  // k
+
         Self {
             v: 0.0,
             x: 0.0,
-            g_bias: 0.0,
-            p: [
-                0.01, // P_vv
-                0.0,  // P_vx
-                0.0,  // P_vb
-                0.01, // P_xx
-                0.0,  // P_xb
-                0.1,  // P_bb（重力リークは小さいので初期不確かさも小さめ）
-            ],
+            a: 0.0,
+            b: 0.0,
+            k: cfg.k0,
+
+            p,
+
+            trust: 0.0,
+
             innovation: 0.0,
+            innov_lp: 0.0,
+            prev_innov_lp: 0.0,
+            flip_lp: 0.0,
+
+            prev_a_meas: 0.0,
+            prev_command: 0.0,
+
+            r_eff: cfg.r_accel,
+            jerk_meas: 0.0,
+
             cfg,
         }
     }
 
-    /// 予測 + 観測更新 + レギュレータ出力
+    #[inline(always)]
+    fn clamp(x: f32, lo: f32, hi: f32) -> f32 {
+        if x < lo { lo } else if x > hi { hi } else { x }
+    }
+
+    #[inline(always)]
+    fn lerp(a: f32, b: f32, t: f32) -> f32 {
+        a + (b - a) * t
+    }
+
+    fn symmetrize(p: &mut [[f32; 5]; 5]) {
+        for i in 0..5 {
+            for j in (i + 1)..5 {
+                let v = 0.5 * (p[i][j] + p[j][i]);
+                p[i][j] = v;
+                p[j][i] = v;
+            }
+            if p[i][i] < 0.0 {
+                p[i][i] = 0.0;
+            }
+        }
+    }
+
+    /// 更新
     ///
-    /// # Arguments
-    /// * `command`  - total_output [PWM]（デッドゾーン前）
-    /// * `ax_g`     - LPF後の加速度計X [g]（Z-up計算座標系）
-    /// * `pitch`    - MEKFピッチ角 [rad]
+    /// * command : total_output [PWM]（デッドゾーン前）
+    /// * ax_g    : LPF後の加速度計X [g]（Z-up計算座標系）
+    /// * pitch   : MEKFピッチ角 [rad]
     ///
-    /// # Returns
-    /// 角度オフセット [rad]
+    /// 戻り値: 角度オフセット [rad]
     pub fn update(&mut self, command: f32, ax_g: f32, pitch: f32) -> f32 {
         let dt = self.cfg.dt;
 
-        // ══════ 予測 ══════
-        // 【変更】バイアスは予測に含めない
-        let a_cmd = self.cfg.k_cmd * command;
-        self.v += a_cmd * dt;
-        self.x += self.v * dt;
-
-        // 共分散予測: P = F·P·Fᵀ + Q
-        //
-        // 【変更】F行列が変わった
-        // F = [[1,  0,  0],    ← バイアスは速度に影響しない
-        //      [dt, 1,  0],
-        //      [0,  0,  1]]
-        let [pv, pvx, pvb, px, pxb, pb] = self.p;
-        self.p = [
-            /* P_vv */ pv + self.cfg.q_v,
-            /* P_vx */ dt * pv + pvx,
-            /* P_vb */ pvb,  // 【変更】バイアスと速度の相関は伝播しない
-            /* P_xx */ dt * dt * pv + 2.0 * dt * pvx + px,
-            /* P_xb */ dt * pvb + pxb,
-            /* P_bb */ pb + self.cfg.q_bias,
-        ];
-
-        // ══════ 観測更新 ══════
-        // 加速度計から水平並進加速度を取り出す
+        // ───── 観測（加速度） ─────
         let a_meas = -(ax_g + sinf(pitch)) * 9.81;
 
-        // 【変更】観測モデル: h = a_cmd + g_bias
-        // innovation = z - h = a_meas - a_cmd - g_bias
-        let a_pred = a_cmd + self.g_bias;
-        self.innovation = a_meas - a_pred;
+        // 観測jerk（“あり得なさ”）
+        let j_meas = (a_meas - self.prev_a_meas) / dt;
+        self.jerk_meas = j_meas;
 
-        // 【変更】H = [0, 0, +1]（符号が変わった）
-        // S = H·P·Hᵀ + R = P_bb + R
-        let s = self.p[5] + self.cfg.r_accel;
-        let s_inv = 1.0 / s;
+        let jerk_ratio = j_meas.abs() / (self.cfg.j_max + 1e-6);
+        let r_scale = 1.0 + self.cfg.jerk_r_scale * (jerk_ratio * jerk_ratio);
+        let r_eff = self.cfg.r_accel * r_scale;
+        self.r_eff = r_eff;
 
-        // 【変更】カルマンゲイン K = P·Hᵀ / S = [P_vb, P_xb, P_bb]ᵀ / S
-        // H = [0, 0, +1] なので符号が反転
-        let kv = self.p[2] * s_inv;
-        let kx = self.p[4] * s_inv;
-        let kb = self.p[5] * s_inv;
+        // ───── trust（前回）から b のリーク・Q を作る ─────
+        // trust=0 → 強リーク + 小Q（暴走防止）
+        // trust=1 → 弱リーク + 大Q（追従）
+        let tau_b = Self::lerp(self.cfg.tau_b_min, self.cfg.tau_b_max, self.trust);
+        // 離散一次遅れの係数（0..1に収まる形）
+        let beta_b = dt / (tau_b + dt + 1e-6);
+        let psi_b = 1.0 - beta_b;
 
-        // 状態補正
-        self.v += kv * self.innovation;
-        self.x += kx * self.innovation;
-        self.g_bias += kb * self.innovation;
+        let q_b = Self::lerp(self.cfg.q_b_min, self.cfg.q_b_max, self.trust);
 
-        // 共分散更新: P = (I − K·H) · P
-        // H = [0, 0, +1] なので:
-        // P_vv  -= K_v · P_vb = P_vb² / S
-        // P_vx  -= K_v · P_xb = P_vb · P_xb / S
-        // P_xx  -= K_x · P_xb = P_xb² / S
-        // P_vb  -= K_v · P_bb → P_vb · (1 - P_bb/S) = P_vb · R/S
-        // P_xb  -= K_x · P_bb → P_xb · R/S
-        // P_bb  -= K_b · P_bb → P_bb · R/S
-        let rs = self.cfg.r_accel * s_inv;
-        self.p[0] -= self.p[2] * self.p[2] * s_inv;
-        self.p[1] -= self.p[2] * self.p[4] * s_inv;
-        self.p[3] -= self.p[4] * self.p[4] * s_inv;
-        self.p[2] *= rs;
-        self.p[4] *= rs;
-        self.p[5] *= rs;
+        // k の励起（duが大きいほどkを動かしやすくする）
+        let du = (command - self.prev_command).abs();
+        let c_u = du / (du + self.cfg.u_scale_for_k);
+        let q_k = self.cfg.q_k * c_u;
 
-        // ══════ レギュレータ出力 ══════
+        // ───── 状態予測 ─────
+        // k: k0 への平均回帰
+        let gamma_k = Self::clamp(dt / (self.cfg.tau_k + dt + 1e-6), 0.0, 1.0);
+        let eta_k = 1.0 - gamma_k;
+        self.k = eta_k * self.k + gamma_k * self.cfg.k0;
+
+        // a: 1次遅れで a_target=k*command へ追従（jerkでクリップ）
+        let a_target = self.k * command;
+        let alpha_a_nom = Self::clamp(dt / (self.cfg.tau_a + dt + 1e-6), 0.0, 1.0);
+        let mut da = alpha_a_nom * (a_target - self.a);
+        let da_max = self.cfg.j_max * dt;
+        da = Self::clamp(da, -da_max, da_max);
+
+        // クリップ後の“実効alpha”を使って線形化を合わせる（重要）
+        let denom = (a_target - self.a);
+        let alpha_a = if denom.abs() > 1e-9 { (da / denom).abs() } else { 0.0 };
+        let alpha_a = Self::clamp(alpha_a, 0.0, alpha_a_nom);
+
+        self.a += da;
+
+        // v, x: aを積分
+        self.v += self.a * dt;
+        self.x += self.v * dt;
+
+        // b: trustに応じたリーク（平均回帰先は0。必要なら基準値へ戻す形に変更可）
+        self.b *= psi_b;
+
+        // ───── 共分散予測 ─────
+        // 状態 s=[v,x,a,b,k]
+        // 更新:
+        //   a' = phi*a + alpha_cmd*k      (phi=1-alpha_a, alpha_cmd=alpha_a*command)
+        //   v' = v + dt*a'
+        //   x' = x + dt*v' = x + dt*v + dt^2*a'
+        //   b' = psi_b*b
+        //   k' = eta_k*k + const
+        let phi = 1.0 - alpha_a;
+        let alpha_cmd = alpha_a * command;
+
+        let mut f = [[0.0f32; 5]; 5];
+        // v'
+        f[0][0] = 1.0;
+        f[0][2] = dt * phi;
+        f[0][4] = dt * alpha_cmd;
+        // x'
+        f[1][0] = dt;
+        f[1][1] = 1.0;
+        f[1][2] = dt * dt * phi;
+        f[1][4] = dt * dt * alpha_cmd;
+        // a'
+        f[2][2] = phi;
+        f[2][4] = alpha_cmd;
+        // b'
+        f[3][3] = psi_b;
+        // k'
+        f[4][4] = eta_k;
+
+        // Q（対角のみ。単位は厳密でなくても「保険として正しい方向」に効く形）
+        let mut q = [[0.0f32; 5]; 5];
+        q[0][0] = self.cfg.q_v * dt;
+        q[2][2] = self.cfg.q_a * dt;
+        q[3][3] = q_b * dt;
+        q[4][4] = q_k * dt;
+
+        // P = F P F^T + Q
+        let p0 = self.p;
+        let mut fp = [[0.0f32; 5]; 5];
+        for i in 0..5 {
+            for j in 0..5 {
+                let mut s = 0.0;
+                for k in 0..5 {
+                    s += f[i][k] * p0[k][j];
+                }
+                fp[i][j] = s;
+            }
+        }
+        let mut p_pred = [[0.0f32; 5]; 5];
+        for i in 0..5 {
+            for j in 0..5 {
+                let mut s = 0.0;
+                for k in 0..5 {
+                    s += fp[i][k] * f[j][k]; // *F^T
+                }
+                p_pred[i][j] = s + q[i][j];
+            }
+        }
+        Self::symmetrize(&mut p_pred);
+        self.p = p_pred;
+
+        // ───── 観測更新 ─────
+        // z = a_meas
+        // h = a + b
+        self.innovation = a_meas - (self.a + self.b);
+
+        // 残差LPF（持続性）
+        self.prev_innov_lp = self.innov_lp;
+        self.innov_lp += self.cfg.innov_lpf_alpha * (self.innovation - self.innov_lp);
+
+        // 符号反転度（多いほど「ノイズっぽい」）
+        let flipped = if (self.innov_lp * self.prev_innov_lp) < 0.0 { 1.0 } else { 0.0 };
+        self.flip_lp += self.cfg.flip_lpf_alpha * (flipped - self.flip_lp);
+        let c_flip = 1.0 - Self::clamp(self.flip_lp, 0.0, 1.0);
+
+        // trust更新（次ステップに効かせる）
+        // - jerkが大きいほどtrust↓（観測の形が怪しい）
+        // - 残差LPFが大きいほどtrust↑（持続誤差=バイアスっぽい）
+        // - 符号反転が多いほどtrust↓
+        let c_j = 1.0 / (1.0 + jerk_ratio * jerk_ratio);
+        let c_r = Self::clamp(self.innov_lp.abs() / (self.cfg.bias_residual_scale + 1e-6), 0.0, 1.0);
+        let trust_next = Self::clamp(c_j * c_r * c_flip, 0.0, 1.0);
+
+        // H=[0,0,1,1,0]
+        // S = Paa + Pbb + 2*Pab + R
+        let paa = self.p[2][2];
+        let pbb = self.p[3][3];
+        let pab = self.p[2][3];
+        let s = paa + pbb + 2.0 * pab + r_eff;
+        let s_inv = 1.0 / (s + 1e-9);
+
+        // K = P H^T / S = (P[:,a] + P[:,b]) / S
+        let mut k_gain = [0.0f32; 5];
+        for i in 0..5 {
+            k_gain[i] = (self.p[i][2] + self.p[i][3]) * s_inv;
+        }
+
+        // 状態更新: x += K * innovation
+        self.v += k_gain[0] * self.innovation;
+        self.x += k_gain[1] * self.innovation;
+        self.a += k_gain[2] * self.innovation;
+        self.b += k_gain[3] * self.innovation;
+        self.k += k_gain[4] * self.innovation;
+
+        // Joseph形式: P = (I-KH) P (I-KH)^T + K R K^T
+        // H は a,b のみに 1。よって KH の列2,3が K、他0。
+        let mut a_mat = [[0.0f32; 5]; 5];
+        for i in 0..5 {
+            a_mat[i][i] = 1.0;
+            a_mat[i][2] -= k_gain[i];
+            a_mat[i][3] -= k_gain[i];
+        }
+
+        let p_before = self.p;
+
+        let mut ap = [[0.0f32; 5]; 5];
+        for i in 0..5 {
+            for j in 0..5 {
+                let mut ss = 0.0;
+                for k in 0..5 {
+                    ss += a_mat[i][k] * p_before[k][j];
+                }
+                ap[i][j] = ss;
+            }
+        }
+
+        let mut p_new = [[0.0f32; 5]; 5];
+        for i in 0..5 {
+            for j in 0..5 {
+                let mut ss = 0.0;
+                for k in 0..5 {
+                    ss += ap[i][k] * a_mat[j][k];
+                }
+                p_new[i][j] = ss;
+            }
+        }
+
+        // + K R K^T
+        for i in 0..5 {
+            for j in 0..5 {
+                p_new[i][j] += k_gain[i] * r_eff * k_gain[j];
+            }
+        }
+
+        Self::symmetrize(&mut p_new);
+        self.p = p_new;
+
+        // trustを更新（連続制御）
+        self.trust = trust_next;
+
+        // 履歴更新
+        self.prev_a_meas = a_meas;
+        self.prev_command = command;
+
+        // ───── レギュレータ出力 ─────
         let raw = self.cfg.k_pos * self.x + self.cfg.k_vel * self.v;
         self.cfg.max_output * tanhf(raw / self.cfg.max_output)
     }
@@ -188,16 +452,44 @@ impl PositionEkf {
         PosEkfState {
             velocity: self.v,
             position: self.x,
-            g_bias: self.g_bias,
+            accel: self.a,
+            bias: self.b,
+            k_est: self.k,
+
             innovation: self.innovation,
+            innov_lp: self.innov_lp,
+            trust: self.trust,
+
+            r_eff: self.r_eff,
+            jerk_meas: self.jerk_meas,
         }
     }
 
     pub fn reset(&mut self) {
         self.v = 0.0;
         self.x = 0.0;
-        self.g_bias = 0.0;
-        self.p = [0.01, 0.0, 0.0, 0.01, 0.0, 0.1];
+        self.a = 0.0;
+        self.b = 0.0;
+        self.k = self.cfg.k0;
+
+        self.p = [[0.0; 5]; 5];
+        self.p[0][0] = 0.01;
+        self.p[1][1] = 0.01;
+        self.p[2][2] = 0.5;
+        self.p[3][3] = 0.1;
+        self.p[4][4] = 1e-6;
+
+        self.trust = 0.0;
+
         self.innovation = 0.0;
+        self.innov_lp = 0.0;
+        self.prev_innov_lp = 0.0;
+        self.flip_lp = 0.0;
+
+        self.prev_a_meas = 0.0;
+        self.prev_command = 0.0;
+
+        self.r_eff = self.cfg.r_accel;
+        self.jerk_meas = 0.0;
     }
 }
