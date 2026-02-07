@@ -236,7 +236,7 @@ impl PositionEkf {
         let dt = self.cfg.dt;
 
         // ───── 観測（加速度） ─────
-        let a_meas = -(ax_g + sinf(pitch)) * 9.81;
+        let a_meas = (ax_g + sinf(pitch)) * 9.81; //正だったみたい
 
         // 観測jerk（“あり得なさ”）
         let j_meas = (a_meas - self.prev_a_meas) / dt;

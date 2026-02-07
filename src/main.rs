@@ -406,9 +406,9 @@ fn main() -> ! {
         flip_lpf_alpha: 0.05,
         bias_residual_scale: 0.5,
 
-        k_pos: 0.1,
-        k_vel: 0.2,
-        max_output: 0.05,
+        k_pos: 0.05,
+        k_vel: 0.5,
+        max_output: 0.35,
         ..Default::default()
     });
 
@@ -473,7 +473,7 @@ fn main() -> ! {
                             // info!("g={}, {}, {}", gx, gy, gz);
                             // info!("m=({},{},{})", mc, my, mz);
                             // info!("r={}, {}, {}", state.roll, state.pitch, state.yaw);
-                            // info!("g={}", ax + libm::sinf(state.pitch));
+                            // info!("ax={}, g={}, accel={}", ax, libm::sinf(state.pitch), (ax + libm::sinf(state.pitch)) * 9.81);
                         }
                         counter += 1;
 
