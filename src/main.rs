@@ -381,23 +381,23 @@ fn main() -> ! {
     let mut pos_ekf = pos_ekf::PositionEkf::new(pos_ekf::PosEkfConfig {
         dt: DT,
 
-        k0: 2.0 / (TORQUE_TO_PWM * 0.03 * 0.1) * 0.05,
+        k0: (2.0 / (TORQUE_TO_PWM * 0.03 * 0.1)) * 0.05 * 0.1,
 
-        tau_a: 0.02,
+        tau_a: 0.02,//0.02,
         j_max: 50.0,
 
         tau_k: 10.0,
 
-        r_accel: 1.0,
-        jerk_r_scale: 2.0,
+        r_accel: 20.0,//1.0,
+        jerk_r_scale: 2.0,//2.0,
 
         q_a: 5e-3,
         q_v: 1e-5,
         q_k: 1e-8,
         u_scale_for_k: 50.0,
 
-        q_b_max: 1e-6,
-        q_b_min: 1e-10,
+        q_b_max: 1e-5,//1e-6,
+        q_b_min: 1e-10,//1e-10,
 
         tau_b_min: 1.0,
         tau_b_max: 100.0,
@@ -406,7 +406,7 @@ fn main() -> ! {
         flip_lpf_alpha: 0.05,
         bias_residual_scale: 0.5,
 
-        k_pos: 0.05,
+        k_pos: 0.1,
         k_vel: 0.5,
         max_output: 0.35,
         ..Default::default()
@@ -514,7 +514,7 @@ fn main() -> ! {
                             dkf.set_control_torque(tau_control);
 
                             // target_angle = 0.0 - pos_regulator.update(total_output);
-                            target_angle = 0.0 - pos_ekf.update(total_output, ax, state.pitch);
+                            target_angle = 0.0 - pos_ekf.update(total_output, ax, now_angle);
 
                             if counter % PRINT_DIV == 0 {
                                 let ps = pos_ekf.state();

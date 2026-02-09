@@ -238,23 +238,19 @@ impl PositionEkf {
         // ───── 観測（加速度） ─────
         let a_meas = (ax_g + sinf(pitch)) * 9.81; //正だったみたい
 
-        // 観測jerk（“あり得なさ”）
+        // Jerk（加加速度）チェック
         let j_meas = (a_meas - self.prev_a_meas) / dt;
         self.jerk_meas = j_meas;
-
         let jerk_ratio = j_meas.abs() / (self.cfg.j_max + 1e-6);
         let r_scale = 1.0 + self.cfg.jerk_r_scale * (jerk_ratio * jerk_ratio);
-        let r_eff = self.cfg.r_accel * r_scale;
-        self.r_eff = r_eff;
+        self.r_eff = self.cfg.r_accel * r_scale;
 
         // ───── trust（前回）から b のリーク・Q を作る ─────
         // trust=0 → 強リーク + 小Q（暴走防止）
         // trust=1 → 弱リーク + 大Q（追従）
         let tau_b = Self::lerp(self.cfg.tau_b_min, self.cfg.tau_b_max, self.trust);
-        // 離散一次遅れの係数（0..1に収まる形）
-        let beta_b = dt / (tau_b + dt + 1e-6);
+        let beta_b = dt / (tau_b + dt + 1e-6); // 離散一次遅れの係数（0..1に収まる形）
         let psi_b = 1.0 - beta_b;
-
         let q_b = Self::lerp(self.cfg.q_b_min, self.cfg.q_b_max, self.trust);
 
         // k の励起（duが大きいほどkを動かしやすくする）
@@ -377,7 +373,7 @@ impl PositionEkf {
         let paa = self.p[2][2];
         let pbb = self.p[3][3];
         let pab = self.p[2][3];
-        let s = paa + pbb + 2.0 * pab + r_eff;
+        let s = paa + pbb + 2.0 * pab + self.r_eff;
         let s_inv = 1.0 / (s + 1e-9);
 
         // K = P H^T / S = (P[:,a] + P[:,b]) / S
@@ -429,7 +425,7 @@ impl PositionEkf {
         // + K R K^T
         for i in 0..5 {
             for j in 0..5 {
-                p_new[i][j] += k_gain[i] * r_eff * k_gain[j];
+                p_new[i][j] += k_gain[i] * self.r_eff * k_gain[j];
             }
         }
 
