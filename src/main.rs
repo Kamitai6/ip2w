@@ -38,7 +38,7 @@ use embedded_graphics::{
 };
 use embedded_hal_bus::i2c::{RefCellDevice as I2cRefCellDevice};
 use atom::{atom_motion, ina226, bmi270, bmm150, lp5562};
-use control::{fb::{pid, smc}, ff::{gravity, pos_regulator, dkf, pos_ekf}, util::{imu_mekf, deadzone, mag_calibration, mag_ets, mag_rls, lpf}};
+use control::{fb::{pid, smc}, ff::{gravity, pos_regulator, dkf, pos_ekf}, util::{mekf, deadzone, mag_calib, mag_ets, mag_rls, lpf}};
 use mipidsi_async::{
     Builder, 
     models::{GC9107, ST7789}, 
@@ -305,7 +305,7 @@ fn main() -> ! {
     //     }
     // }
     // loop {}
-    let mag_calib = mag_calibration::MagCalibration::new(
+    let mag_calib = mag_calib::MagCalibration::new(
         [80.2899, -1077.7451, -767.7703], // offset
         [[0.025567, 0.000170, -0.001187], // transform
         [0.0000, 0.014415, 0.001860],
@@ -319,8 +319,8 @@ fn main() -> ! {
     let mut lpf_gyro  = lpf::Lpf3::new(100.0, DT);
     let mut lpf_mag   = lpf::Lpf3::new(5.0,  DT);
 
-    let mut ekf = imu_mekf::ImuEkf::new(
-        imu_mekf::EkfConfig {
+    let mut ekf = mekf::ImuEkf::new(
+        mekf::EkfConfig {
             dt: DT,
             gyro_noise: 0.05,
             gyro_bias_noise: 0.001,
@@ -388,7 +388,7 @@ fn main() -> ! {
 
         tau_k: 10.0,
 
-        r_accel: 20.0,//1.0,
+        r_accel: 5.0,//1.0,
         jerk_r_scale: 2.0,//2.0,
 
         q_a: 5e-3,
@@ -396,7 +396,7 @@ fn main() -> ! {
         q_k: 1e-8,
         u_scale_for_k: 50.0,
 
-        q_b_max: 1e-5,//1e-6,
+        q_b_max: 1e-5,//1e-5,
         q_b_min: 1e-10,//1e-10,
 
         tau_b_min: 1.0,
@@ -406,9 +406,16 @@ fn main() -> ! {
         flip_lpf_alpha: 0.05,
         bias_residual_scale: 0.5,
 
-        k_pos: 0.1,
+        k_pos: 0.05,
         k_vel: 0.5,
         max_output: 0.35,
+
+        robot_radius: 0.08,
+        a_max: 4.0,
+        v_max: 0.4,
+        accel_r_scale: 2.0,
+        vel_r_scale: 2.0,
+
         ..Default::default()
     });
 
@@ -452,7 +459,7 @@ fn main() -> ! {
                         // 物理的X-up状態 → 計算用Z-up座標系への変換で
                         // すべて、(x,y,z) => (z,-y,x)に変換しているので注意
                         let (ax, ay, az) = (d.accel.z, -d.accel.y, d.accel.x);
-                        let (gx, gy, gz) = imu_mekf::degree_to_rad((d.gyro.z, -d.gyro.y, d.gyro.x));
+                        let (gx, gy, gz) = mekf::degree_to_rad((d.gyro.z, -d.gyro.y, d.gyro.x));
                         let (ax, ay, az) = lpf_accel.update(ax, ay, az);
                         let (gx, gy, gz) = lpf_gyro.update(gx, gy, gz);
                         let state = ekf.update(ax, ay, az, gx, gy, gz);
@@ -514,7 +521,8 @@ fn main() -> ! {
                             dkf.set_control_torque(tau_control);
 
                             // target_angle = 0.0 - pos_regulator.update(total_output);
-                            target_angle = 0.0 - pos_ekf.update(total_output, ax, now_angle);
+                            let angular_accel = dkf.get_angular_accel(now_angle);
+                            target_angle = 0.0 - pos_ekf.update(total_output, ax, state.pitch, pitch_rate, angular_accel);
 
                             if counter % PRINT_DIV == 0 {
                                 let ps = pos_ekf.state();

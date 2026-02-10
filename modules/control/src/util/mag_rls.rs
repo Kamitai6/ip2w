@@ -7,7 +7,7 @@
 
 use nalgebra::{Matrix3, Vector3};
 use libm::sqrtf;
-use crate::util::mag_calibration::MagCalibration;
+use crate::util::mag_calib::MagCalibration;
 
 /// オンラインRLSの設定
 #[derive(Debug, Clone, Copy)]

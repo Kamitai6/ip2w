@@ -79,6 +79,21 @@ pub struct PosEkfConfig {
 
     /// 最大角度オフセット [rad]
     pub max_output: f32,
+
+    /// 回転軸からセンサーまでの距離 [m]
+    pub robot_radius: f32,
+
+    /// 想定最大並進加速度（ソフトリミット閾値） [m/s²]
+    pub a_max: f32,
+
+    /// 想定最大並進速度（ソフトリミット閾値） [m/s]
+    pub v_max: f32,
+
+    /// 加速度超過時のR膨張強度
+    pub accel_r_scale: f32,
+
+    /// 速度超過時のR膨張強度
+    pub vel_r_scale: f32,
 }
 
 impl Default for PosEkfConfig {
@@ -114,6 +129,12 @@ impl Default for PosEkfConfig {
             k_pos: 0.1,
             k_vel: 0.2,
             max_output: 0.05,
+
+            robot_radius: 0.08,
+            a_max: 4.0,
+            v_max: 0.4,
+            accel_r_scale: 2.0,
+            vel_r_scale: 2.0,
         }
     }
 }
@@ -133,6 +154,8 @@ pub struct PosEkfState {
 
     pub r_eff: f32,
     pub jerk_meas: f32,
+
+    pub a_tangential: f32,
 }
 
 pub struct PositionEkf {
@@ -162,6 +185,7 @@ pub struct PositionEkf {
     // デバッグ
     r_eff: f32,
     jerk_meas: f32,
+    a_tangential: f32,
 
     cfg: PosEkfConfig,
 }
@@ -197,6 +221,7 @@ impl PositionEkf {
 
             r_eff: cfg.r_accel,
             jerk_meas: 0.0,
+            a_tangential: 0.0,
 
             cfg,
         }
@@ -227,22 +252,42 @@ impl PositionEkf {
 
     /// 更新
     ///
-    /// * command : total_output [PWM]（デッドゾーン前）
-    /// * ax_g    : LPF後の加速度計X [g]（Z-up計算座標系）
-    /// * pitch   : MEKFピッチ角 [rad]
+    /// * command       : total_output [PWM]（デッドゾーン前）
+    /// * ax_g          : LPF後の加速度計X [g]（Z-up計算座標系）
+    /// * pitch         : MEKFピッチ角 [rad]
+    /// * pitch_rate    : MEKFピッチ角速度 [rad/s]
+    /// * angular_accel : DKF推定角加速度 [rad/s²]
     ///
     /// 戻り値: 角度オフセット [rad]
-    pub fn update(&mut self, command: f32, ax_g: f32, pitch: f32) -> f32 {
+    pub fn update(&mut self, command: f32, ax_g: f32, pitch: f32,
+                  _pitch_rate: f32, angular_accel: f32) -> f32 {
         let dt = self.cfg.dt;
 
         // ───── 観測（加速度） ─────
-        let a_meas = (ax_g + sinf(pitch)) * 9.81; //正だったみたい
+        // 重力除去
+        let a_raw = (ax_g + sinf(pitch)) * 9.81;
+
+        // 接線加速度補正: IMUオフセット位置での回転起因成分を除去
+        // ボディax = ẍ_trans·cos(θ) + α·L  (遠心力項はボディフレームでキャンセル)
+        // |θ|が小さい倒立振子では cos(θ)≈1 なので ẍ_trans ≈ a_raw + α·L
+        // (符号は座標系依存: 実機検証済み)
+        let a_tangential = angular_accel * self.cfg.robot_radius;
+        let a_meas = a_raw + a_tangential;
+        self.a_tangential = a_tangential;
 
         // Jerk（加加速度）チェック
         let j_meas = (a_meas - self.prev_a_meas) / dt;
         self.jerk_meas = j_meas;
         let jerk_ratio = j_meas.abs() / (self.cfg.j_max + 1e-6);
-        let r_scale = 1.0 + self.cfg.jerk_r_scale * (jerk_ratio * jerk_ratio);
+
+        // 加速度・速度のソフトリミット比（推定値ベース）
+        let a_ratio = self.a.abs() / (self.cfg.a_max + 1e-6);
+        let v_ratio = self.v.abs() / (self.cfg.v_max + 1e-6);
+
+        let r_scale = 1.0
+            + self.cfg.jerk_r_scale * (jerk_ratio * jerk_ratio)
+            + self.cfg.accel_r_scale * (a_ratio * a_ratio)
+            + self.cfg.vel_r_scale * (v_ratio * v_ratio);
         self.r_eff = self.cfg.r_accel * r_scale;
 
         // ───── trust（前回）から b のリーク・Q を作る ─────
@@ -364,9 +409,12 @@ impl PositionEkf {
         // - jerkが大きいほどtrust↓（観測の形が怪しい）
         // - 残差LPFが大きいほどtrust↑（持続誤差=バイアスっぽい）
         // - 符号反転が多いほどtrust↓
+        // - 加速度/速度が物理上限に近いほどtrust↓（推定値が怪しい）
         let c_j = 1.0 / (1.0 + jerk_ratio * jerk_ratio);
         let c_r = Self::clamp(self.innov_lp.abs() / (self.cfg.bias_residual_scale + 1e-6), 0.0, 1.0);
-        let trust_next = Self::clamp(c_j * c_r * c_flip, 0.0, 1.0);
+        let c_a = 1.0 / (1.0 + a_ratio * a_ratio);
+        let c_v = 1.0 / (1.0 + v_ratio * v_ratio);
+        let trust_next = Self::clamp(c_j * c_r * c_flip * c_a * c_v, 0.0, 1.0);
 
         // H=[0,0,1,1,0]
         // S = Paa + Pbb + 2*Pab + R
@@ -381,6 +429,11 @@ impl PositionEkf {
         for i in 0..5 {
             k_gain[i] = (self.p[i][2] + self.p[i][3]) * s_inv;
         }
+        // v, x は予測ステップの積分のみで更新する。
+        // 観測残差がcross-covariance経由でv, xに注入されると
+        // 微小な残差バイアスが一方向ドリフトの原因になるため。
+        k_gain[0] = 0.0; // v
+        k_gain[1] = 0.0; // x
 
         // 状態更新: x += K * innovation
         self.v += k_gain[0] * self.innovation;
@@ -458,6 +511,8 @@ impl PositionEkf {
 
             r_eff: self.r_eff,
             jerk_meas: self.jerk_meas,
+
+            a_tangential: self.a_tangential,
         }
     }
 
@@ -487,5 +542,6 @@ impl PositionEkf {
 
         self.r_eff = self.cfg.r_accel;
         self.jerk_meas = 0.0;
+        self.a_tangential = 0.0;
     }
 }

@@ -11,7 +11,7 @@ use heapless::Vec as HVec;
 use nalgebra::{Matrix3, Vector3};
 use libm::{sqrt, sqrtf};
 
-use crate::util::mag_calibration::MagCalibration;
+use crate::util::mag_calib::MagCalibration;
 
 /// 最大サンプル数
 pub const MAX_SAMPLES: usize = 1000;
