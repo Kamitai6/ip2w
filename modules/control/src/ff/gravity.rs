@@ -11,8 +11,6 @@
 /// a conversion factor `k_pwm` is needed to map torque to PWM values.
 #[derive(Debug, Clone, Copy)]
 pub struct GravityCompensator {
-    /// PWM conversion factor [PWM/Nm]
-    k_pwm: f32,
     /// Precomputed: mass * g * length
     tau_max: f32,
 }
@@ -26,16 +24,14 @@ impl GravityCompensator {
     /// # Arguments
     /// * `mass` - Mass of the pendulum [kg]
     /// * `length` - Distance from pivot to center of mass [m]
-    /// * `k_pwm` - PWM conversion factor [PWM/Nm]
     ///
     /// # Example
     /// ```
-    /// let compensator = GravityCompensator::new(0.3, 0.05, 100.0);
+    /// let compensator = GravityCompensator::new(0.3, 0.05);
     /// ```
-    pub fn new(mass: f32, length: f32, k_pwm: f32) -> Self {
+    pub fn new(mass: f32, length: f32) -> Self {
         let tau_max = mass * Self::G * length;
         Self {
-            k_pwm,
             tau_max,
         }
     }
@@ -46,8 +42,8 @@ impl GravityCompensator {
     /// * `theta` - Current angle from vertical [rad], positive = forward lean
     ///
     /// # Returns
-    /// PWM value to compensate for gravity torque
+    /// gravity torque
     pub fn update(&self, theta: f32) -> f32 {
-        self.k_pwm * self.tau_max * libm::sinf(theta)
+        self.tau_max * libm::sinf(theta)
     }
 }

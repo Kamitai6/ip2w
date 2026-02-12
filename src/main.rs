@@ -7,8 +7,8 @@
 )]
 #![deny(clippy::large_stack_frames)]
 
-use core::{cell::{RefCell, Cell}, f32::consts::PI};
-use alloc::borrow::ToOwned;
+use core::{cell::{RefCell, Cell}, f32::consts::PI, fmt::Write};
+use alloc::{borrow::ToOwned, string::ToString};
 use critical_section::{Mutex, with};
 use defmt::info;
 use libm::{atan2f, sqrtf};
@@ -25,6 +25,10 @@ use esp_hal::{
     i2c::master::{I2c, Config as I2cConfig},
     spi::{master::{Spi, Config as SpiConfig}, Mode as SpiMode},
 };
+use esp_radio::wifi::{AccessPointConfig, ModeConfig};
+use blocking_network_stack::Stack as NetworkStack;
+use smoltcp::iface::{SocketSet, SocketStorage};
+use smoltcp::wire::{IpAddress, Ipv4Address};
 use embedded_graphics::{
     prelude::{IntoStorage, RgbColor, Point, Size, DrawTarget, Primitive},
     pixelcolor::Rgb565,
@@ -92,7 +96,74 @@ fn main() -> ! {
     // wdt0.disable();
     // let mut wdt1 = timg1.wdt;
     // wdt1.disable();
-    info!("init start");
+
+    info!("Network initialize: 192.168.4.1");
+
+    esp_rtos::start(timg1.timer0);
+    let radio_init = esp_radio::init().expect("Failed to initialize Wi-Fi/BLE controller");
+    let (mut wifi_controller, wifi_interfaces) =
+        esp_radio::wifi::new(&radio_init, peripherals.WIFI, Default::default())
+            .expect("Failed to initialize Wi-Fi controller");
+    let ap_config = ModeConfig::AccessPoint(
+        AccessPointConfig::default()
+            .with_ssid("pendulum".to_string())
+    );
+    wifi_controller.set_config(&ap_config).unwrap();
+    wifi_controller.start().unwrap();
+    let mut ap_device = wifi_interfaces.ap;
+
+    let mut socket_set_entries: [SocketStorage; 3] = Default::default();
+    let socket_set = SocketSet::new(&mut socket_set_entries[..]);
+    let now = || Instant::now().duration_since_epoch().as_millis();
+    let rng_for_net = esp_hal::rng::Rng::new();
+
+    fn create_interface(device: &mut esp_radio::wifi::WifiDevice) -> smoltcp::iface::Interface {
+        smoltcp::iface::Interface::new(
+            smoltcp::iface::Config::new(smoltcp::wire::HardwareAddress::Ethernet(
+                smoltcp::wire::EthernetAddress::from_bytes(&device.mac_address()),
+            )),
+            device,
+            smoltcp::time::Instant::from_micros(
+                esp_hal::time::Instant::now().duration_since_epoch().as_micros() as i64,
+            ),
+        )
+    }
+    let mut iface = create_interface(&mut ap_device);
+    let mut net_stack = NetworkStack::new(
+        iface,
+        ap_device,
+        socket_set,
+        now,
+        rng_for_net.random(),
+    );
+    // 固定IP設定（これがないとwork()でIPが設定されない）
+    use blocking_network_stack::ipv4::{Configuration, ClientConfiguration, ClientSettings, Subnet, Mask};
+    net_stack.update_iface_configuration(
+        &Configuration::Client(ClientConfiguration::Fixed(ClientSettings {
+            ip: core::net::Ipv4Addr::new(192, 168, 4, 1),
+            subnet: Subnet {
+                gateway: core::net::Ipv4Addr::new(192, 168, 4, 1),
+                mask: Mask(24),
+            },
+            dns: None,
+            secondary_dns: None,
+        }))
+    ).unwrap();
+
+    let mut udp_rx_meta = [smoltcp::socket::udp::PacketMetadata::EMPTY; 1];
+    let mut udp_tx_meta = [smoltcp::socket::udp::PacketMetadata::EMPTY; 1];
+    let mut udp_rx_buffer = [0u8; 1024]; // 受信しないなら小さくてもOKですが念のため
+    let mut udp_tx_buffer = [0u8; 1024]; // 送信データの最大長
+
+    let mut udp_socket = net_stack.get_udp_socket(
+        &mut udp_rx_meta,
+        &mut udp_rx_buffer,
+        &mut udp_tx_meta,
+        &mut udp_tx_buffer,
+    );
+    udp_socket.bind(45678).unwrap();
+
+    info!("periph init start");
 
     let button = Input::new(peripherals.GPIO41, InputConfig::default().with_pull(Pull::Up));
 
@@ -371,7 +442,7 @@ fn main() -> ! {
         .with_smoothing(0.01)
         .with_v_regulation(U_MAX * 0.8);
 
-    let mut gravity = gravity::GravityCompensator::new(0.1, 0.035, 5000.0);
+    let mut gravity = gravity::GravityCompensator::new(0.1, 0.035);
     // let mut pos_regulator = pos_regulator::PositionRegulator::new(DT, 1000.0, 0.05) // sec sec rad
     //     .with_max(100.0, 10.0)
     //     // .with_lowpass(5.0)
@@ -420,12 +491,6 @@ fn main() -> ! {
     });
 
     let mut yaw_pid = pid::PID::new(DT, 10.0, 0.0, 20.0);
-    
-    // esp_rtos::start(timg0.timer0);
-    // let radio_init = esp_radio::init().expect("Failed to initialize Wi-Fi/BLE controller");
-    // let (mut _wifi_controller, _interfaces) =
-    //     esp_radio::wifi::new(&radio_init, peripherals.WIFI, Default::default())
-    //         .expect("Failed to initialize Wi-Fi controller");
 
     let timer0 = timg0.timer0;
     timer0.set_interrupt_handler(tg0_t0_handler);
@@ -448,6 +513,7 @@ fn main() -> ! {
     info!("Start!");
     loop {
         display.poll();
+        udp_socket.work();
         if events::has_pending_events() {
             while let Some(event) = events::get_event() {
                 match event {
@@ -476,6 +542,27 @@ fn main() -> ! {
                             // ekf.update_mag_yaw(mx, my, mz);
                         }
                         if counter % PRINT_DIV == 0 {
+                            // 送信先: ブロードキャスト (255.255.255.255)
+                            // ポート: PC側でlistenしているポート (例: 5000)
+                            let remote_addr = IpAddress::Ipv4(Ipv4Address::new(255, 255, 255, 255));
+                            let remote_port = 5000;
+
+                            // 送信データ作成
+                            let mut msg = heapless::String::<128>::new();
+                            // センサーの値などを埋め込む例
+                            // write!(&mut msg, "Loop Count: {}, Sensor: {}", counter, sensor_val).unwrap(); 
+                            write!(&mut msg, "Ping from ESP32-S3!").unwrap();
+
+                            // 送信
+                            // UdpSocket::send は内部で work() を呼び出し、送信バッファが空くまでブロックします
+                            match udp_socket.send(remote_addr, remote_port, msg.as_bytes()) {
+                                Ok(_) => {
+                                    // defmt::info!("UDP Sent"); // 必要ならローカルログ
+                                },
+                                Err(e) => {
+                                    defmt::error!("UDP Send Error: {:?}", e);
+                                }
+                            }
                             // info!("a={}, {}, {}", ax, ay, az);
                             // info!("g={}, {}, {}", gx, gy, gz);
                             // info!("m=({},{},{})", mc, my, mz);
@@ -501,7 +588,7 @@ fn main() -> ! {
                             let e = target_angle - now_angle;
                             let e_dot = 0.0 - state.pitch_rate;
                             let fb = smc.update(e, e_dot);
-                            let ff_gravity = -gravity.update(now_angle);
+                            let ff_gravity = -gravity.update(now_angle) * TORQUE_TO_PWM;
                             let ff_disturbance = -dkf_state.disturbance * TORQUE_TO_PWM;
                             let atom_max = atom_motion::MOTOR_SPEED_MAX as f32;
                             let total_output = fb + ff_gravity + ff_disturbance;

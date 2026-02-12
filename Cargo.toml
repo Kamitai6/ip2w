@@ -32,6 +32,12 @@ critical-section = "1.2"
 defmt = "1.0"
 heapless = "0.9"
 libm = {version = "0.2"}
+blocking-network-stack = { path = "./modules/blocking-network-stack", default-features = false, features = [
+  "defmt",
+  "dhcpv4",
+  "tcp",
+  "udp",
+] }
 smoltcp = { version = "0.12", default-features = false, features = [
   "defmt",
   "medium-ethernet",
