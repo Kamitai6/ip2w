@@ -26,6 +26,21 @@ const LOCAL_PORT_MIN: u16 = 41000;
 #[cfg(feature = "tcp")]
 const LOCAL_PORT_MAX: u16 = 65535;
 
+#[cfg(feature = "udp")]
+const MAX_SEND_SIZE: usize = 1048;
+#[cfg(feature = "udp")]
+#[derive(Clone, Copy)]
+pub enum UdpState {
+    Idle,
+    // 送信待ちデータを持つ状態
+    Sending {
+        addr: smoltcp::wire::IpAddress,
+        port: u16,
+        data: [u8; MAX_SEND_SIZE], // 固定長バッファ
+        len: usize,               // 実際のデータ長
+    },
+}
+
 /// Non-async TCP/IP network stack
 ///
 /// Mostly a convenience wrapper for `smoltcp`
@@ -326,6 +341,7 @@ impl<'a, D: smoltcp::phy::Device> Stack<'a, D> {
         UdpSocket {
             socket_handle,
             network: self,
+            state: UdpState::Idle,
         }
     }
 
@@ -855,6 +871,7 @@ impl<'s, 'n: 's, D: smoltcp::phy::Device> embedded_io::WriteReady for Socket<'s,
 pub struct UdpSocket<'s, 'n: 's, D: smoltcp::phy::Device> {
     socket_handle: SocketHandle,
     network: &'s Stack<'n, D>,
+    state: UdpState,
 }
 
 #[cfg(feature = "udp")]
@@ -957,6 +974,73 @@ impl<'s, 'n: 's, D: smoltcp::phy::Device> UdpSocket<'s, 'n, D> {
             }
             Err(e) => Err(IoError::UdpRecvError(e)),
         }
+    }
+
+    /// スタックを回し、保留中の送信があれば再試行する
+    pub fn poll(&mut self) {
+        // 1. スタックの駆動（必須）
+        self.work();
+
+        // 2. 保留データの送信試行
+        // stateを借用チェックから逃がすため一時的に取り出す
+        let next_state = match self.state {
+            UdpState::Idle => UdpState::Idle,
+            UdpState::Sending { addr, port, data, len } => {
+                let sent = self.network.with_mut(|_iface, _dev, sockets| {
+                    let sock = sockets.get_mut::<smoltcp::socket::udp::Socket>(self.socket_handle);
+                    
+                    // バッファに空きがあるか確認
+                    if sock.can_send() 
+                       && sock.packet_send_capacity() > 0 
+                       && sock.payload_send_capacity() >= len 
+                    {
+                        // 送信（コピー）
+                        let endpoint: smoltcp::wire::IpEndpoint = (addr, port).into();
+                        sock.send_slice(&data[..len], endpoint).ok();
+                        true // 成功（またはエラーでもここでは成功扱いにして次へ進む）
+                    } else {
+                        false // まだバッファがいっぱい
+                    }
+                });
+
+                if sent {
+                    UdpState::Idle // 送信完了
+                } else {
+                    // まだ送れていないので状態維持
+                    UdpState::Sending { addr, port, data, len }
+                }
+            }
+        };
+        self.state = next_state;
+    }
+
+    /// データをバッファにセットする。すでにBusyなら false を返す。
+    pub fn send_request(&mut self, addr: smoltcp::wire::IpAddress, port: u16, data: &[u8]) -> bool {
+        // 現在送信待ちのデータがある場合は、上書きする (最新を優先) 
+        
+        if data.len() > MAX_SEND_SIZE {
+            return false; // データ長すぎ
+        }
+
+        let mut buf = [0u8; MAX_SEND_SIZE];
+        buf[..data.len()].copy_from_slice(data);
+
+        self.state = UdpState::Sending {
+            addr,
+            port,
+            data: buf,
+            len: data.len(),
+        };
+
+        // セットした直後に一度pollして、可能なら即送ってしまう（遅延を減らすため）
+        self.poll();
+        
+        true
+    }
+
+    /// 送信待ちデータがないか確認
+    pub fn is_idle(&self) -> bool {
+        matches!(self.state, UdpState::Idle)
     }
 
     /// This function specifies a new multicast group for this socket to join

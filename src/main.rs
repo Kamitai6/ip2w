@@ -12,6 +12,7 @@ use alloc::{borrow::ToOwned, string::ToString};
 use critical_section::{Mutex, with};
 use defmt::info;
 use libm::{atan2f, sqrtf};
+use heapless::String;
 use {esp_backtrace as _, esp_println as _};
 
 use esp_hal::{
@@ -58,6 +59,74 @@ extern crate alloc;
 // This creates a default app-descriptor required by the esp-idf bootloader.
 // For more information see: <https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/system/app_image_format.html#application-description>
 esp_bootloader_esp_idf::esp_app_desc!();
+
+// 1回のログの最大文字数（allocを使わずヒープレスで管理）
+const UDP_LOG_BUF_SIZE: usize = 256;
+
+struct UdpLoggerState {
+    target: Option<(IpAddress, u16)>,
+    buffer: String<UDP_LOG_BUF_SIZE>,
+}
+
+// どこからでもアクセスできるグローバルな状態
+static UDP_LOGGER_STATE: Mutex<RefCell<UdpLoggerState>> = Mutex::new(RefCell::new(UdpLoggerState {
+    target: None,
+    buffer: String::new(),
+}));
+
+/// 実行中の任意のタイミングで宛先を設定・変更できる関数
+pub fn udp_logger_init(addr: IpAddress, port: u16) {
+    with(|cs| {
+        let mut state = UDP_LOGGER_STATE.borrow_ref_mut(cs);
+        state.target = Some((addr, port));
+    });
+}
+
+/// メインループ内で毎回呼び出す関数
+pub fn udp_logger_poll<D: smoltcp::phy::Device>(socket: &mut blocking_network_stack::UdpSocket<'_, '_, D>) {
+    // UDPの受信処理やスタックの維持のため、送信の有無に関わらず回す
+    socket.poll();
+
+    // グローバルバッファからデータを取り出す
+    let (data_to_send, target) = with(|cs| {
+        let mut state = UDP_LOGGER_STATE.borrow_ref_mut(cs);
+        if state.buffer.is_empty() {
+            return (None, None);
+        }
+
+        let mut temp_buf = [0u8; UDP_LOG_BUF_SIZE];
+        let len = state.buffer.len();
+        temp_buf[..len].copy_from_slice(state.buffer.as_bytes());
+        state.buffer.clear();
+
+        (Some((temp_buf, len)), state.target)
+    });
+
+    // データがあれば、UdpSocketの送信キュー(send_request)に突っ込む
+    if let (Some((buf, len)), Some((addr, port))) = (data_to_send, target) {
+        socket.send_request(addr, port, &buf[..len]);
+    }
+}
+
+#[macro_export]
+macro_rules! udp_println {
+    ($($arg:tt)*) => {{
+        critical_section::with(|cs| {
+            let mut state = UDP_LOGGER_STATE.borrow_ref_mut(cs);
+            // ターゲットが設定されている場合のみ処理
+            if state.target.is_some() {
+                use core::fmt::Write;
+                
+                // バッファに書き込み（フォーマットエラーや容量オーバー時は一度クリアして最新を優先）
+                if write!(&mut state.buffer, $($arg)*).is_err() {
+                    state.buffer.clear();
+                    let _ = write!(&mut state.buffer, $($arg)*); 
+                }
+                let _ = write!(&mut state.buffer, "\n"); // 改行を追加
+            }
+        });
+    }};
+}
 
 const FREQUENCY: u32 = 500;
 const PERIOD_US: u64 = 1_000_000 / FREQUENCY as u64;
@@ -162,6 +231,10 @@ fn main() -> ! {
         &mut udp_tx_buffer,
     );
     udp_socket.bind(45678).unwrap();
+
+    // デバッグ先PCのIPとポートを設定
+    let target_ip = smoltcp::wire::IpAddress::Ipv4(smoltcp::wire::Ipv4Address::new(192, 168, 4, 2));
+    udp_logger_init(target_ip, 5000);
 
     info!("periph init start");
 
@@ -513,7 +586,7 @@ fn main() -> ! {
     info!("Start!");
     loop {
         display.poll();
-        udp_socket.work();
+        udp_logger_poll(&mut udp_socket);
         if events::has_pending_events() {
             while let Some(event) = events::get_event() {
                 match event {
@@ -542,27 +615,7 @@ fn main() -> ! {
                             // ekf.update_mag_yaw(mx, my, mz);
                         }
                         if counter % PRINT_DIV == 0 {
-                            // 送信先: ブロードキャスト (255.255.255.255)
-                            // ポート: PC側でlistenしているポート (例: 5000)
-                            let remote_addr = IpAddress::Ipv4(Ipv4Address::new(255, 255, 255, 255));
-                            let remote_port = 5000;
-
-                            // 送信データ作成
-                            let mut msg = heapless::String::<128>::new();
-                            // センサーの値などを埋め込む例
-                            // write!(&mut msg, "Loop Count: {}, Sensor: {}", counter, sensor_val).unwrap(); 
-                            write!(&mut msg, "Ping from ESP32-S3!").unwrap();
-
-                            // 送信
-                            // UdpSocket::send は内部で work() を呼び出し、送信バッファが空くまでブロックします
-                            match udp_socket.send(remote_addr, remote_port, msg.as_bytes()) {
-                                Ok(_) => {
-                                    // defmt::info!("UDP Sent"); // 必要ならローカルログ
-                                },
-                                Err(e) => {
-                                    defmt::error!("UDP Send Error: {:?}", e);
-                                }
-                            }
+                            udp_println!("a={}, {}, {}", ax, ay, az);
                             // info!("a={}, {}, {}", ax, ay, az);
                             // info!("g={}, {}, {}", gx, gy, gz);
                             // info!("m=({},{},{})", mc, my, mz);
