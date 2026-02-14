@@ -156,6 +156,13 @@ pub struct PosEkfState {
     pub jerk_meas: f32,
 
     pub a_tangential: f32,
+
+    // 追加デバッグ情報
+    pub a_meas: f32,         // 観測加速度（接線補正後）
+    pub a_raw: f32,          // 観測加速度（接線補正前）
+    pub pitch: f32,          // 入力ピッチ角
+    pub command: f32,        // 入力コマンド
+    pub g_times_pitch: f32,  // g × pitch（物理的期待値の目安）
 }
 
 pub struct PositionEkf {
@@ -179,13 +186,19 @@ pub struct PositionEkf {
     flip_lp: f32,
 
     // 観測履歴
-    prev_a_meas: f32,
+    prev_a_raw: f32,
     prev_command: f32,
 
     // デバッグ
     r_eff: f32,
     jerk_meas: f32,
     a_tangential: f32,
+
+    // 追加デバッグ情報
+    a_meas: f32,
+    a_raw: f32,
+    pitch: f32,
+    command: f32,
 
     cfg: PosEkfConfig,
 }
@@ -216,12 +229,18 @@ impl PositionEkf {
             prev_innov_lp: 0.0,
             flip_lp: 0.0,
 
-            prev_a_meas: 0.0,
+            prev_a_raw: 0.0,
             prev_command: 0.0,
 
             r_eff: cfg.r_accel,
             jerk_meas: 0.0,
             a_tangential: 0.0,
+
+            // 追加デバッグ情報
+            a_meas: 0.0,
+            a_raw: 0.0,
+            pitch: 0.0,
+            command: 0.0,
 
             cfg,
         }
@@ -275,8 +294,15 @@ impl PositionEkf {
         let a_meas = a_raw + a_tangential;
         self.a_tangential = a_tangential;
 
-        // Jerk（加加速度）チェック
-        let j_meas = (a_meas - self.prev_a_meas) / dt;
+        // デバッグ情報保存
+        self.a_meas = a_meas;
+        self.a_raw = a_raw;
+        self.pitch = pitch;
+        self.command = command;
+
+        // Jerk（加加速度）チェック - a_rawベースで計算
+        // 接線加速度補正由来の急変はノイズではないため、補正前のa_rawで判定
+        let j_meas = (a_raw - self.prev_a_raw) / dt;
         self.jerk_meas = j_meas;
         let jerk_ratio = j_meas.abs() / (self.cfg.j_max + 1e-6);
 
@@ -429,11 +455,6 @@ impl PositionEkf {
         for i in 0..5 {
             k_gain[i] = (self.p[i][2] + self.p[i][3]) * s_inv;
         }
-        // v, x は予測ステップの積分のみで更新する。
-        // 観測残差がcross-covariance経由でv, xに注入されると
-        // 微小な残差バイアスが一方向ドリフトの原因になるため。
-        k_gain[0] = 0.0; // v
-        k_gain[1] = 0.0; // x
 
         // 状態更新: x += K * innovation
         self.v += k_gain[0] * self.innovation;
@@ -489,7 +510,7 @@ impl PositionEkf {
         self.trust = trust_next;
 
         // 履歴更新
-        self.prev_a_meas = a_meas;
+        self.prev_a_raw = a_raw;
         self.prev_command = command;
 
         // ───── レギュレータ出力 ─────
@@ -513,6 +534,13 @@ impl PositionEkf {
             jerk_meas: self.jerk_meas,
 
             a_tangential: self.a_tangential,
+
+            // 追加デバッグ情報
+            a_meas: self.a_meas,
+            a_raw: self.a_raw,
+            pitch: self.pitch,
+            command: self.command,
+            g_times_pitch: 9.81 * self.pitch,
         }
     }
 
@@ -537,11 +565,17 @@ impl PositionEkf {
         self.prev_innov_lp = 0.0;
         self.flip_lp = 0.0;
 
-        self.prev_a_meas = 0.0;
+        self.prev_a_raw = 0.0;
         self.prev_command = 0.0;
 
         self.r_eff = self.cfg.r_accel;
         self.jerk_meas = 0.0;
         self.a_tangential = 0.0;
+
+        // 追加デバッグ情報
+        self.a_meas = 0.0;
+        self.a_raw = 0.0;
+        self.pitch = 0.0;
+        self.command = 0.0;
     }
 }

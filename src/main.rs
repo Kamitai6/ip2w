@@ -525,14 +525,14 @@ fn main() -> ! {
     let mut pos_ekf = pos_ekf::PositionEkf::new(pos_ekf::PosEkfConfig {
         dt: DT,
 
-        k0: (2.0 / (TORQUE_TO_PWM * 0.03 * 0.1)) * 0.05 * 0.1,
+        k0: 0.01,//(2.0 / (TORQUE_TO_PWM * 0.03 * 0.1)) * 0.05 * 0.1,
 
         tau_a: 0.02,//0.02,
-        j_max: 50.0,
+        j_max: 200.0,
 
         tau_k: 10.0,
 
-        r_accel: 5.0,//1.0,
+        r_accel: 1000.0,//5.0,
         jerk_r_scale: 2.0,//2.0,
 
         q_a: 5e-3,
@@ -550,13 +550,13 @@ fn main() -> ! {
         flip_lpf_alpha: 0.05,
         bias_residual_scale: 0.5,
 
-        k_pos: 0.05,
-        k_vel: 0.5,
+        k_pos: 0.003,
+        k_vel: 0.03,
         max_output: 0.35,
 
         robot_radius: 0.08,
-        a_max: 4.0,
-        v_max: 0.4,
+        a_max: 5.0,
+        v_max: 0.5,
         accel_r_scale: 2.0,
         vel_r_scale: 2.0,
 
@@ -615,7 +615,6 @@ fn main() -> ! {
                             // ekf.update_mag_yaw(mx, my, mz);
                         }
                         if counter % PRINT_DIV == 0 {
-                            udp_println!("a={}, {}, {}", ax, ay, az);
                             // info!("a={}, {}, {}", ax, ay, az);
                             // info!("g={}, {}, {}", gx, gy, gz);
                             // info!("m=({},{},{})", mc, my, mz);
@@ -666,9 +665,26 @@ fn main() -> ! {
 
                             if counter % PRINT_DIV == 0 {
                                 let ps = pos_ekf.state();
-                                // pos_ekf::log_pos_v3(cfg.dt, cfg.k_pos, cfg.k_vel, cfg.max_output, command, ax_g, pitch, out, &st);
-                                // info!("accel_term={}, cmd_term={}",
-                                //     -(ax + libm::sinf(state.pitch)) * 9.81, total_output * (2.0 / (TORQUE_TO_PWM * 0.03 * 0.1)) * 0.05);
+                                udp_println!(
+                                    "{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3}",
+                                    // 1. 位置制御の効き・サチュレーション確認用
+                                    ps.position,
+                                    ps.velocity,
+                                    ps.command,
+
+                                    // 2. 加速度の信頼性とノイズ確認用
+                                    ps.a_raw,        // 接線補正前の元加速度
+                                    ps.a_tangential, // 角加速度から計算した接線加速度成分
+                                    ps.a_meas,       // 最終的にEKFに渡された観測加速度
+                                    ps.g_times_pitch,// ピッチ角から期待される加速度の物理的目安
+
+                                    // 3. 10cmの振動の原因（EKFの内部状態）確認用
+                                    ps.bias,
+                                    ps.innovation,
+                                    ps.innov_lp,
+                                    ps.trust,
+                                    ps.k_est
+                                );
                             }
                         } else {
                             m1_pwm = 0;
