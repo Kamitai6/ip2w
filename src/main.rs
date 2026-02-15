@@ -555,6 +555,11 @@ fn main() -> ! {
         max_output: 0.35,
 
         robot_radius: 0.08,
+
+        tangential_scale: 0.5,
+        tangential_lpf_tau: 0.05,
+        command_lpf_tau: 0.1,
+
         a_max: 5.0,
         v_max: 0.5,
         accel_r_scale: 2.0,

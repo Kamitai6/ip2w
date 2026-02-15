@@ -83,6 +83,16 @@ pub struct PosEkfConfig {
     /// 回転軸からセンサーまでの距離 [m]
     pub robot_radius: f32,
 
+    // --- ここから追加 ---
+    /// 接線加速度補正のスケール係数 (0.0 ~ 1.0)
+    pub tangential_scale: f32,
+
+    /// 接線加速度用のLPF時定数 [s] (例: 0.05)
+    pub tangential_lpf_tau: f32,
+
+    /// コマンド(予測モデル)用のLPF時定数 [s] (例: 0.1)
+    pub command_lpf_tau: f32,
+
     /// 想定最大並進加速度（ソフトリミット閾値） [m/s²]
     pub a_max: f32,
 
@@ -131,6 +141,11 @@ impl Default for PosEkfConfig {
             max_output: 0.05,
 
             robot_radius: 0.08,
+
+            tangential_scale: 0.5,      // 実機に合わせて0.5〜0.8程度に調整
+            tangential_lpf_tau: 0.05,   // 20Hzカットオフ程度
+            command_lpf_tau: 0.1,       // 10Hzカットオフ程度
+
             a_max: 4.0,
             v_max: 0.4,
             accel_r_scale: 2.0,
@@ -194,6 +209,11 @@ pub struct PositionEkf {
     jerk_meas: f32,
     a_tangential: f32,
 
+    /// 接線加速度LPFの前回値
+    a_tangential_lp: f32,
+    /// コマンドLPFの前回値
+    command_lp: f32,
+
     // 追加デバッグ情報
     a_meas: f32,
     a_raw: f32,
@@ -235,6 +255,9 @@ impl PositionEkf {
             r_eff: cfg.r_accel,
             jerk_meas: 0.0,
             a_tangential: 0.0,
+
+            a_tangential_lp: 0.0,
+            command_lp: 0.0,
 
             // 追加デバッグ情報
             a_meas: 0.0,
@@ -286,13 +309,15 @@ impl PositionEkf {
         // 重力除去
         let a_raw = (ax_g + sinf(pitch)) * 9.81;
 
-        // 接線加速度補正: IMUオフセット位置での回転起因成分を除去
-        // ボディax = ẍ_trans·cos(θ) + α·L  (遠心力項はボディフレームでキャンセル)
-        // |θ|が小さい倒立振子では cos(θ)≈1 なので ẍ_trans ≈ a_raw + α·L
-        // (符号は座標系依存: 実機検証済み)
-        let a_tangential = angular_accel * self.cfg.robot_radius;
-        let a_meas = a_raw + a_tangential;
-        self.a_tangential = a_tangential;
+        // 接線加速度補正
+        let raw_a_tangential = angular_accel * self.cfg.robot_radius * self.cfg.tangential_scale;
+
+        // 接線加速度へのLPF適用
+        let alpha_tan = Self::clamp(dt / (self.cfg.tangential_lpf_tau + dt + 1e-6), 0.0, 1.0);
+        self.a_tangential_lp += alpha_tan * (raw_a_tangential - self.a_tangential_lp);
+
+        let a_meas = a_raw + self.a_tangential_lp;
+        self.a_tangential = self.a_tangential_lp;
 
         // デバッグ情報保存
         self.a_meas = a_meas;
@@ -324,6 +349,12 @@ impl PositionEkf {
         let psi_b = 1.0 - beta_b;
         let q_b = Self::lerp(self.cfg.q_b_min, self.cfg.q_b_max, self.trust);
 
+        // command への LPF 適用 (予測モデル用)
+        let alpha_cmd = Self::clamp(dt / (self.cfg.command_lpf_tau + dt + 1e-6), 0.0, 1.0);
+        self.command_lp += alpha_cmd * (command - self.command_lp);
+        
+        let filtered_command = self.command_lp;
+
         // k の励起（duが大きいほどkを動かしやすくする）
         let du = (command - self.prev_command).abs();
         let c_u = du / (du + self.cfg.u_scale_for_k);
@@ -335,8 +366,8 @@ impl PositionEkf {
         let eta_k = 1.0 - gamma_k;
         self.k = eta_k * self.k + gamma_k * self.cfg.k0;
 
-        // a: 1次遅れで a_target=k*command へ追従（jerkでクリップ）
-        let a_target = self.k * command;
+        // a: 1次遅れで a_target=k*filtered_command へ追従
+        let a_target = self.k * filtered_command;
         let alpha_a_nom = Self::clamp(dt / (self.cfg.tau_a + dt + 1e-6), 0.0, 1.0);
         let mut da = alpha_a_nom * (a_target - self.a);
         let da_max = self.cfg.j_max * dt;
@@ -365,21 +396,21 @@ impl PositionEkf {
         //   b' = psi_b*b
         //   k' = eta_k*k + const
         let phi = 1.0 - alpha_a;
-        let alpha_cmd = alpha_a * command;
+        let alpha_cmd_cov = alpha_a * filtered_command;
 
         let mut f = [[0.0f32; 5]; 5];
         // v'
         f[0][0] = 1.0;
         f[0][2] = dt * phi;
-        f[0][4] = dt * alpha_cmd;
+        f[0][4] = dt * alpha_cmd_cov;
         // x'
         f[1][0] = dt;
         f[1][1] = 1.0;
         f[1][2] = dt * dt * phi;
-        f[1][4] = dt * dt * alpha_cmd;
+        f[1][4] = dt * dt * alpha_cmd_cov;
         // a'
         f[2][2] = phi;
-        f[2][4] = alpha_cmd;
+        f[2][4] = alpha_cmd_cov;
         // b'
         f[3][3] = psi_b;
         // k'
@@ -571,6 +602,9 @@ impl PositionEkf {
         self.r_eff = self.cfg.r_accel;
         self.jerk_meas = 0.0;
         self.a_tangential = 0.0;
+
+        self.a_tangential_lp = 0.0;
+        self.command_lp = 0.0;
 
         // 追加デバッグ情報
         self.a_meas = 0.0;
