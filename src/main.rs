@@ -132,12 +132,12 @@ const FREQUENCY: u32 = 500;
 const PERIOD_US: u64 = 1_000_000 / FREQUENCY as u64;
 const DT: f32 = 1.0 / FREQUENCY as f32;
 const U_MAX: f32 = 300.0;
-/// PWM → トルク変換係数 [Nm/PWM]
-const PWM_TO_TORQUE: f32 = 1.0 / 5000.0;
 /// トルク → PWM変換係数 [PWM/Nm]
 const TORQUE_TO_PWM: f32 = 5000.0;
+/// PWM → トルク変換係数 [Nm/PWM]
+const PWM_TO_TORQUE: f32 = 1.0 / TORQUE_TO_PWM;
 /// ピッチオフセット [rad]（重心バランス点）
-const PITCH_OFFSET: f32 = 0.125;
+const PITCH_OFFSET: f32 = -0.125;
 
 const MOTION_DIV: u32 = 1;
 const DISPLAY_DIV: u32 = 10;
@@ -525,23 +525,23 @@ fn main() -> ! {
     let mut pos_ekf = pos_ekf::PositionEkf::new(pos_ekf::PosEkfConfig {
         dt: DT,
 
-        k0: 0.01,//(2.0 / (TORQUE_TO_PWM * 0.03 * 0.1)) * 0.05 * 0.1,
+        k0: (1.0 / (TORQUE_TO_PWM * 0.03 * 0.1)) * 0.8,
 
-        tau_a: 0.02,//0.02,
+        tau_a: 0.02,
         j_max: 200.0,
 
         tau_k: 10.0,
 
-        r_accel: 1000.0,//5.0,
-        jerk_r_scale: 2.0,//2.0,
+        r_accel: 5.0,
+        jerk_r_scale: 2.0,
 
         q_a: 5e-3,
         q_v: 1e-5,
-        q_k: 1e-8,
+        q_k: 0.0,
         u_scale_for_k: 50.0,
 
-        q_b_max: 1e-5,//1e-5,
-        q_b_min: 1e-10,//1e-10,
+        q_b_max: 1e-5,
+        q_b_min: 1e-10,
 
         tau_b_min: 1.0,
         tau_b_max: 100.0,
@@ -551,14 +551,15 @@ fn main() -> ! {
         bias_residual_scale: 0.5,
 
         k_pos: 0.003,
-        k_vel: 0.03,
+        k_vel: 0.04,
         max_output: 0.35,
 
         robot_radius: 0.08,
 
         tangential_scale: 0.5,
         tangential_lpf_tau: 0.05,
-        command_lpf_tau: 0.1,
+
+        command_lpf_tau: 0.016,
 
         a_max: 5.0,
         v_max: 0.5,
@@ -638,7 +639,7 @@ fn main() -> ! {
                         }
 
                         if drive {
-                            let now_angle = state.pitch + PITCH_OFFSET;
+                            let now_angle = state.pitch - PITCH_OFFSET;
                             let pitch_rate = state.pitch_rate;
                             let dkf_state = dkf.update(now_angle, pitch_rate);
 
@@ -666,24 +667,28 @@ fn main() -> ! {
 
                             // target_angle = 0.0 - pos_regulator.update(total_output);
                             let angular_accel = dkf.get_angular_accel(now_angle);
-                            target_angle = 0.0 - pos_ekf.update(total_output, ax, state.pitch, pitch_rate, angular_accel);
+                            target_angle = 0.0 - pos_ekf.update(total_output, ax, state.pitch, now_angle, angular_accel);
 
                             if counter % PRINT_DIV == 0 {
                                 let ps = pos_ekf.state();
                                 udp_println!(
-                                    "{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3}",
-                                    // 1. 位置制御の効き・サチュレーション確認用
+                                    "{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3}",
+                                    // 1. 位置と速度（結果）
                                     ps.position,
                                     ps.velocity,
-                                    ps.command,
 
-                                    // 2. 加速度の信頼性とノイズ確認用
-                                    ps.a_raw,        // 接線補正前の元加速度
-                                    ps.a_tangential, // 角加速度から計算した接線加速度成分
-                                    ps.a_meas,       // 最終的にEKFに渡された観測加速度
-                                    ps.g_times_pitch,// ピッチ角から期待される加速度の物理的目安
+                                    // 2. 予測モデルの検証用（今回追加した最重要ブロック）
+                                    ps.command,       // モーターへの指令値
+                                    ps.g_times_pitch, // 重力による倒れ込み成分
+                                    ps.a_target,      // 【重要】予測された加速度 (k*command - 重力成分)
 
-                                    // 3. 10cmの振動の原因（EKFの内部状態）確認用
+                                    // 3. 観測モデルの検証用
+                                    ps.a_raw,         // 接線補正前の元加速度
+                                    ps.a_tangential,  // 接線加速度成分
+                                    ps.a_meas,        // 【重要】実際に観測された加速度
+
+                                    // 4. EKFの融合結果と内部状態
+                                    ps.accel,         // EKFが推定した真の加速度
                                     ps.bias,
                                     ps.innovation,
                                     ps.innov_lp,
