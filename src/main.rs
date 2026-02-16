@@ -525,20 +525,20 @@ fn main() -> ! {
     let mut pos_ekf = pos_ekf::PositionEkf::new(pos_ekf::PosEkfConfig {
         dt: DT,
 
-        k0: (1.0 / (TORQUE_TO_PWM * 0.03 * 0.1)) * 0.8,
+        // k0: (1.0 / (TORQUE_TO_PWM * 0.03 * 0.1)) * 0.8,
 
         tau_a: 0.02,
-        j_max: 200.0,
+        j_max: 50.0,
 
-        tau_k: 10.0,
+        // tau_k: 10.0,
 
-        r_accel: 5.0,
+        r_accel: 1.0,
         jerk_r_scale: 2.0,
 
         q_a: 5e-3,
         q_v: 1e-5,
-        q_k: 0.0,
-        u_scale_for_k: 50.0,
+        // q_k: 0.0,
+        // u_scale_for_k: 50.0,
 
         q_b_max: 1e-5,
         q_b_min: 1e-10,
@@ -550,8 +550,8 @@ fn main() -> ! {
         flip_lpf_alpha: 0.05,
         bias_residual_scale: 0.5,
 
-        k_pos: 0.003,
-        k_vel: 0.04,
+        k_pos: 10.0,
+        k_vel: 10.0,
         max_output: 0.35,
 
         robot_radius: 0.08,
@@ -559,7 +559,7 @@ fn main() -> ! {
         tangential_scale: 0.5,
         tangential_lpf_tau: 0.05,
 
-        command_lpf_tau: 0.016,
+        // command_lpf_tau: 0.016,
 
         a_max: 5.0,
         v_max: 0.5,
@@ -667,20 +667,20 @@ fn main() -> ! {
 
                             // target_angle = 0.0 - pos_regulator.update(total_output);
                             let angular_accel = dkf.get_angular_accel(now_angle);
-                            target_angle = 0.0 - pos_ekf.update(total_output, ax, state.pitch, now_angle, angular_accel);
+                            target_angle = 0.0 + pos_ekf.update(ax, state.pitch, now_angle, angular_accel);
 
                             if counter % PRINT_DIV == 0 {
                                 let ps = pos_ekf.state();
                                 udp_println!(
-                                    "{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3}",
+                                    "{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3}",
                                     // 1. 位置と速度（結果）
                                     ps.position,
                                     ps.velocity,
 
                                     // 2. 予測モデルの検証用（今回追加した最重要ブロック）
-                                    ps.command,       // モーターへの指令値
-                                    ps.g_times_pitch, // 重力による倒れ込み成分
-                                    ps.a_target,      // 【重要】予測された加速度 (k*command - 重力成分)
+                                    // ps.command,       // モーターへの指令値
+                                    // ps.g_times_pitch, // 重力による倒れ込み成分
+                                    // ps.a_target,      // 【重要】予測された加速度 (k*command - 重力成分)
 
                                     // 3. 観測モデルの検証用
                                     ps.a_raw,         // 接線補正前の元加速度
@@ -693,7 +693,7 @@ fn main() -> ! {
                                     ps.innovation,
                                     ps.innov_lp,
                                     ps.trust,
-                                    ps.k_est
+                                    // ps.k_est
                                 );
                             }
                         } else {
