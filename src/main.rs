@@ -527,15 +527,15 @@ fn main() -> ! {
 
         // k0: (1.0 / (TORQUE_TO_PWM * 0.03 * 0.1)) * 0.8,
 
-        tau_a: 0.02,
-        j_max: 50.0,
+        tau_a: 1.0,
+        j_max: 300.0,
 
         // tau_k: 10.0,
 
         r_accel: 1.0,
         jerk_r_scale: 2.0,
 
-        q_a: 5e-3,
+        q_a: 0.1,
         q_v: 1e-5,
         // q_k: 0.0,
         // u_scale_for_k: 50.0,
@@ -550,8 +550,8 @@ fn main() -> ! {
         flip_lpf_alpha: 0.05,
         bias_residual_scale: 0.5,
 
-        k_pos: 10.0,
-        k_vel: 10.0,
+        k_pos: 1.0,
+        k_vel: 1.0,
         max_output: 0.35,
 
         robot_radius: 0.08,
@@ -672,28 +672,18 @@ fn main() -> ! {
                             if counter % PRINT_DIV == 0 {
                                 let ps = pos_ekf.state();
                                 udp_println!(
-                                    "{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3}",
-                                    // 1. 位置と速度（結果）
+                                    "{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3}",
                                     ps.position,
                                     ps.velocity,
-
-                                    // 2. 予測モデルの検証用（今回追加した最重要ブロック）
-                                    // ps.command,       // モーターへの指令値
-                                    // ps.g_times_pitch, // 重力による倒れ込み成分
-                                    // ps.a_target,      // 【重要】予測された加速度 (k*command - 重力成分)
-
-                                    // 3. 観測モデルの検証用
-                                    ps.a_raw,         // 接線補正前の元加速度
-                                    ps.a_tangential,  // 接線加速度成分
-                                    ps.a_meas,        // 【重要】実際に観測された加速度
-
-                                    // 4. EKFの融合結果と内部状態
-                                    ps.accel,         // EKFが推定した真の加速度
+                                    ps.a_raw,
+                                    ps.a_tangential,
+                                    ps.a_meas,
+                                    ps.accel,
                                     ps.bias,
                                     ps.innovation,
                                     ps.innov_lp,
                                     ps.trust,
-                                    // ps.k_est
+                                    ps.r_eff,
                                 );
                             }
                         } else {
