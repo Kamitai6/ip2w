@@ -143,7 +143,7 @@ const MOTION_DIV: u32 = 1;
 const DISPLAY_DIV: u32 = 10;
 const TEMP_DIV: u32 = 500;
 const MAG_DIV: u32 = 10;
-const PRINT_DIV: u32 = 100;
+const PRINT_DIV: u32 = 50;
 const RLS_DIV: u32 = 500;
 
 static TIMER0: Mutex<RefCell<Option<Timg>>> = Mutex::new(RefCell::new(None));
@@ -580,6 +580,9 @@ fn main() -> ! {
     let mut target_angle = 0.0;
     let mut counter = 0;
 
+    let mut gyro_lpf = 0.0;
+    let mut prev_gyro_lpf = 0.0;
+
     info!("Start!");
     loop {
         display.poll();
@@ -658,25 +661,22 @@ fn main() -> ! {
 
                             // target_angle = 0.0 - pos_regulator.update(total_output);
                             let angular_accel = dkf.get_angular_accel(now_angle);
-                            target_angle = 0.0 - pos_ekf.update(total_output, ax, state.pitch, now_angle, angular_accel);
+                            target_angle = 0.0;// - pos_ekf.update(total_output, ax, state.pitch, now_angle, angular_accel);
 
                             if counter % PRINT_DIV == 0 {
                                 let ps = pos_ekf.state();
+                                let alpha_gyro = DT / (0.02 + DT); // 50Hz LPF
+                                    gyro_lpf += alpha_gyro * (state.pitch_rate - gyro_lpf);
+                                let gyro_angular_accel = (gyro_lpf - prev_gyro_lpf) / DT;
+                                    prev_gyro_lpf = gyro_lpf;
+                                let a_raw = (ax + libm::sinf(state.pitch)) * 9.81;
                                 udp_println!(
-                                    "{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3}",
-                                    ps.position,
-                                    ps.velocity,
-                                    ps.a_raw,
-                                    ps.a_tangential,
-                                    ps.a_meas,
-                                    ps.accel,
-                                    ps.bias,
-                                    ps.innovation,
-                                    ps.innov_lp,
-                                    ps.trust,
-                                    ps.r_eff,
-                                    ps.command_lp,
-                                    ps.z_cmd,
+                                    "{:.3},{:.3},{:.3},{:.3},{:.3}",
+                                    total_output,                    // command
+                                    gyro_angular_accel * 0.08,       // ジャイロ由来の接線加速度
+                                    angular_accel * 0.08,            // DKF由来の接線加速度（比較用）
+                                    a_raw,                           // 重力補償済み加速度
+                                    now_angle,
                                 );
                             }
                         } else {
