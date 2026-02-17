@@ -525,21 +525,24 @@ fn main() -> ! {
     let mut pos_ekf = pos_ekf::PositionEkf::new(pos_ekf::PosEkfConfig {
         dt: DT,
 
-        // k0: (1.0 / (TORQUE_TO_PWM * 0.03 * 0.1)) * 0.8,
+        k0: (1.0 / (TORQUE_TO_PWM * 0.03 * 0.1)) * 0.08,
+        robot_radius: 0.08,
 
         tau_a: 1.0,
         j_max: 300.0,
-
-        // tau_k: 10.0,
-
-        r_accel: 1.0,
+        a_max: 5.0,
+        v_max: 0.5,
+        r_accel: 1000.0,
         jerk_r_scale: 2.0,
+        accel_r_scale: 2.0,
+        vel_r_scale: 2.0,
+
+        tangential_scale: 0.5,
+        tangential_lpf_tau: 0.05,
+        command_lpf_tau: 0.016,
 
         q_a: 0.1,
         q_v: 1e-5,
-        // q_k: 0.0,
-        // u_scale_for_k: 50.0,
-
         q_b_max: 1e-5,
         q_b_min: 1e-10,
 
@@ -550,21 +553,9 @@ fn main() -> ! {
         flip_lpf_alpha: 0.05,
         bias_residual_scale: 0.5,
 
-        k_pos: 1.0,
+        k_pos: 0.1,
         k_vel: 1.0,
         max_output: 0.35,
-
-        robot_radius: 0.08,
-
-        tangential_scale: 0.5,
-        tangential_lpf_tau: 0.05,
-
-        // command_lpf_tau: 0.016,
-
-        a_max: 5.0,
-        v_max: 0.5,
-        accel_r_scale: 2.0,
-        vel_r_scale: 2.0,
 
         ..Default::default()
     });
@@ -667,12 +658,12 @@ fn main() -> ! {
 
                             // target_angle = 0.0 - pos_regulator.update(total_output);
                             let angular_accel = dkf.get_angular_accel(now_angle);
-                            target_angle = 0.0 + pos_ekf.update(ax, state.pitch, now_angle, angular_accel);
+                            target_angle = 0.0 - pos_ekf.update(total_output, ax, state.pitch, now_angle, angular_accel);
 
                             if counter % PRINT_DIV == 0 {
                                 let ps = pos_ekf.state();
                                 udp_println!(
-                                    "{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3}",
+                                    "{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3}",
                                     ps.position,
                                     ps.velocity,
                                     ps.a_raw,
@@ -684,6 +675,8 @@ fn main() -> ! {
                                     ps.innov_lp,
                                     ps.trust,
                                     ps.r_eff,
+                                    ps.command_lp,
+                                    ps.z_cmd,
                                 );
                             }
                         } else {
