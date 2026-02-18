@@ -530,6 +530,7 @@ fn main() -> ! {
         wheel_radius: 0.03,
         mass: 0.1,
         robot_radius: 0.08,
+        motor_efficiency: 0.5,
 
         j_max: 400.0,
         a_max: 50.0,
@@ -537,9 +538,8 @@ fn main() -> ! {
 
         command_lpf_tau: 0.016,
         sign_lpf_tau: 0.4,
-        tau_a_min: 0.1,
-        tau_a_max: 10.0,
-        innov_tau_scale: 0.0,
+        tau_a_min: 0.01,
+        tau_a_max: 1.0,
 
         r_accel: 1.0,
         constraint_r_scale: 2.0,
@@ -661,19 +661,21 @@ fn main() -> ! {
                                 gyro_lpf += alpha_gyro * (state.pitch_rate - gyro_lpf);
                             let gyro_angular_accel = (gyro_lpf - prev_gyro_lpf) / DT;
                                 prev_gyro_lpf = gyro_lpf;
-                            target_angle = 0.0 - pos_ekf.update(total_output, ax, state.pitch, now_angle, gyro_angular_accel);
+                            target_angle = 0.0 - pos_ekf.update(total_output.clamp(-U_MAX, U_MAX), ax, state.pitch, now_angle, gyro_angular_accel);
 
                             if counter % PRINT_DIV == 0 {
                                 let ps = pos_ekf.state();
                                 udp_println!(
-                                    "{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3}",
-                                    ps.position, ps.velocity,           // 0,1: 位置推定
-                                    ps.a_target, ps.a_meas, ps.a_raw,   // 2,3,4: 加速度比較
-                                    ps.accel, ps.bias,                   // 5,6: EKF内部状態
-                                    ps.innovation, ps.sign_agree_lp,     // 7,8: 適応指標
-                                    ps.r_eff,                            // 9: 観測ノイズ
-                                    ps.tangential_cmd, ps.tangential_sensor, // 10,11: 接線補正
-                                    ps.command_lp,                       // 12: コマンド
+                                    "{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.4},{:.4},{:.6},{:.3}",
+                                    ps.position, ps.velocity,           // 0,1
+                                    ps.a_target, ps.a_meas, ps.a_raw,   // 2,3,4
+                                    ps.accel, ps.bias,                   // 5,6
+                                    ps.innovation, ps.sign_agree_lp,     // 7,8
+                                    ps.r_eff, ps.tau_a,                  // 9,10
+                                    ps.tangential_cmd, ps.tangential_sensor, // 11,12
+                                    ps.k_gain_a, ps.k_gain_b,           // 13,14
+                                    ps.q_b,                              // 15
+                                    ps.command_lp,                       // 16
                                 );
                             }
                         } else {

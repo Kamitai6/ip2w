@@ -11,7 +11,7 @@ use libm::{sinf, tanhf};
 /// 観測: -(a_raw + gyro_α * robot_radius * 0.8)
 ///
 /// 予測・観測ともにジャイロ由来の接線補正を適用し、並進加速度を推定。
-/// sign_agree（予測と観測の符号一致度）でcommand追従速度とbias学習を制御。
+/// sign_agree（予測と観測のjerk符号一致度）でcommand追従速度とbias学習を制御。
 ///
 /// 状態: [v, x, a, b]
 ///   v:  並進速度 [m/s]
@@ -26,13 +26,13 @@ pub struct PosEkfConfig {
     pub wheel_radius: f32,        // 車輪半径 [m]
     pub mass: f32,                // 質量 [kg]
     pub robot_radius: f32,        // 回転軸からセンサまでの距離 [m]
+    pub motor_efficiency: f32,    // モーター効率（0〜1）
 
     // ── 入力フィルタ・予測追従 ──
     pub command_lpf_tau: f32,     // command LPF時定数 [s]
     pub sign_lpf_tau: f32,        // sign_agreeのLPF時定数 [s]
     pub tau_a_min: f32,           // command追従時定数（sign高：速い）[s]
     pub tau_a_max: f32,           // command追従時定数（sign低：遅い）[s]
-    pub innov_tau_scale: f32,     // innovation²によるtau_a増大係数
 
     // ── ハードウェア制約 ──
     pub j_max: f32,               // 最大ジャーク [m/s³]
@@ -65,12 +65,12 @@ impl Default for PosEkfConfig {
             wheel_radius: 0.03,
             mass: 0.1,
             robot_radius: 0.08,
+            motor_efficiency: 0.5,
 
             command_lpf_tau: 0.016,
             sign_lpf_tau: 0.2,
             tau_a_min: 0.1,
             tau_a_max: 10.0,
-            innov_tau_scale: 2.0,
 
             j_max: 300.0,
             a_max: 5.0,
@@ -109,6 +109,11 @@ pub struct PosEkfState {
     pub command_lp: f32,
     pub tangential_cmd: f32,
     pub tangential_sensor: f32,
+
+    pub tau_a: f32,
+    pub q_b: f32,
+    pub k_gain_a: f32,
+    pub k_gain_b: f32,
 }
 
 pub struct PositionEkf {
@@ -123,6 +128,7 @@ pub struct PositionEkf {
     innovation: f32,
 
     prev_a_meas: f32,
+    prev_a_target: f32,
     command_lp: f32,
 
     r_eff: f32,
@@ -131,6 +137,10 @@ pub struct PositionEkf {
     a_target: f32,
     tangential_cmd: f32,
     tangential_sensor: f32,
+    tau_a_actual: f32,
+    q_b_actual: f32,
+    k_gain_a: f32,
+    k_gain_b: f32,
 
     cfg: PosEkfConfig,
 }
@@ -148,9 +158,11 @@ impl PositionEkf {
             p,
             sign_agree_lp: 0.5,
             innovation: 0.0,
-            prev_a_meas: 0.0, command_lp: 0.0,
+            prev_a_meas: 0.0, prev_a_target: 0.0, command_lp: 0.0,
             r_eff: cfg.r_accel, a_meas: 0.0, a_raw: 0.0, a_target: 0.0,
             tangential_cmd: 0.0, tangential_sensor: 0.0,
+            tau_a_actual: cfg.tau_a_max, q_b_actual: cfg.q_b_min,
+            k_gain_a: 0.0, k_gain_b: 0.0,
             cfg,
         }
     }
@@ -202,11 +214,13 @@ impl PositionEkf {
 
         // ───── 3. 予測の目標値（command側の並進加速度） ─────
         let tau_total = self.command_lp / self.cfg.torque_to_pwm;
-        let a_target = (tau_total - tangential_cmd) * 0.5 / (self.cfg.wheel_radius * self.cfg.mass);
+        let a_target = (tau_total - tangential_cmd) * self.cfg.motor_efficiency / (self.cfg.wheel_radius * self.cfg.mass);
         self.a_target = a_target;
 
-        // ───── 4. sign_agree ─────
-        let sign_agree = if (a_target * a_meas) > 0.0 { 1.0 } else { 0.0 };
+        // ───── 4. sign_agree（jerkベース：バイアスに影響されない） ─────
+        let da_target = a_target - self.prev_a_target;
+        let da_meas = a_meas - self.prev_a_meas;
+        let sign_agree = if (da_target * da_meas) > 0.0 { 1.0 } else { 0.0 };
         let alpha_sign = Self::clamp(dt / (self.cfg.sign_lpf_tau + dt + 1e-6), 0.0, 1.0);
         self.sign_agree_lp += alpha_sign * (sign_agree - self.sign_agree_lp);
 
@@ -221,11 +235,10 @@ impl PositionEkf {
         self.r_eff = self.cfg.r_accel * r_scale;
 
         // ───── 6. sign_agree連動パラメータ ─────
-        let distrust = (1.0 - self.sign_agree_lp)
-            + self.cfg.innov_tau_scale * (self.innovation * self.innovation);
-        let distrust = Self::clamp(distrust, 0.0, 1.0);
-        let tau_a = Self::lerp(self.cfg.tau_a_min, self.cfg.tau_a_max, distrust);
+        let tau_a = Self::lerp(self.cfg.tau_a_min, self.cfg.tau_a_max, 1.0 - self.sign_agree_lp);
         let q_b = Self::lerp(self.cfg.q_b_min, self.cfg.q_b_max, self.sign_agree_lp);
+        self.tau_a_actual = tau_a;
+        self.q_b_actual = q_b;
 
         // ───── 7. 状態予測 ─────
         let alpha_a_nom = Self::clamp(dt / (tau_a + dt + 1e-6), 0.0, 1.0);
@@ -290,6 +303,8 @@ impl PositionEkf {
         for i in 0..4 {
             k_gain[i] = (self.p[i][2] + self.p[i][3]) * s_inv;
         }
+        self.k_gain_a = k_gain[2];
+        self.k_gain_b = k_gain[3];
 
         self.v += k_gain[0] * self.innovation;
         self.x += k_gain[1] * self.innovation;
@@ -328,6 +343,7 @@ impl PositionEkf {
         Self::symmetrize(&mut p_new);
         self.p = p_new;
         self.prev_a_meas = a_meas;
+        self.prev_a_target = a_target;
 
         // ───── 10. レギュレータ出力 ─────
         let raw = self.cfg.k_pos * self.x + self.cfg.k_vel * self.v;
@@ -342,6 +358,8 @@ impl PositionEkf {
             a_meas: self.a_meas, a_raw: self.a_raw, a_target: self.a_target,
             command_lp: self.command_lp,
             tangential_cmd: self.tangential_cmd, tangential_sensor: self.tangential_sensor,
+            tau_a: self.tau_a_actual, q_b: self.q_b_actual,
+            k_gain_a: self.k_gain_a, k_gain_b: self.k_gain_b,
         }
     }
 
@@ -350,8 +368,10 @@ impl PositionEkf {
         self.p = [[0.0; 4]; 4];
         self.p[0][0] = 0.01; self.p[1][1] = 0.01; self.p[2][2] = 0.5; self.p[3][3] = 0.1;
         self.sign_agree_lp = 0.5; self.innovation = 0.0;
-        self.prev_a_meas = 0.0; self.command_lp = 0.0;
+        self.prev_a_meas = 0.0; self.prev_a_target = 0.0; self.command_lp = 0.0;
         self.r_eff = self.cfg.r_accel; self.a_meas = 0.0; self.a_raw = 0.0; self.a_target = 0.0;
         self.tangential_cmd = 0.0; self.tangential_sensor = 0.0;
+        self.tau_a_actual = self.cfg.tau_a_max; self.q_b_actual = self.cfg.q_b_min;
+        self.k_gain_a = 0.0; self.k_gain_b = 0.0;
     }
 }
