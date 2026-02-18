@@ -475,12 +475,12 @@ fn main() -> ! {
 
     let mut dkf = dkf::Dkf::new(dkf::DkfConfig {
         dt: DT,
-        inertia: 0.002,
+        inertia: 0.000363, //(1/3)*0.1*(0.1*0.1+0.03*0.03)=0.000363333333333
         mgl: 0.1 * 9.81 * 0.035,  // ≈ 0.034 Nm
         q_omega: 0.1,
-        q_disturbance: 1e-5,     // 調整ポイント: 大きくすると追従速く、小さくすると滑らか
+        q_disturbance: 1e-6,     // 調整ポイント: 大きくすると追従速く、小さくすると滑らか
         r_gyro: 0.001,
-        disturbance_limit: 0.05,    // ±0.1 Nm（最大重力トルクの3倍程度）
+        disturbance_limit: 0.05,    // ±0.05 Nm
         ..Default::default()
     });
     info!("imu ok");
@@ -525,21 +525,21 @@ fn main() -> ! {
     let mut pos_ekf = pos_ekf::PositionEkf::new(pos_ekf::PosEkfConfig {
         dt: DT,
 
-        k0: (1.0 / (TORQUE_TO_PWM * 0.03 * 0.1)) * 0.08,
+        torque_to_pwm: TORQUE_TO_PWM,
+        wheel_radius: 0.03,
+        mass: 0.1,
+        inertia: 0.000363,
         robot_radius: 0.08,
 
         tau_a: 1.0,
+        r_accel: 10.0,
+
         j_max: 300.0,
         a_max: 5.0,
         v_max: 0.5,
-        r_accel: 1000.0,
         jerk_r_scale: 2.0,
         accel_r_scale: 2.0,
         vel_r_scale: 2.0,
-
-        tangential_scale: 0.5,
-        tangential_lpf_tau: 0.05,
-        command_lpf_tau: 0.016,
 
         q_a: 0.1,
         q_v: 1e-5,
@@ -552,9 +552,10 @@ fn main() -> ! {
         innov_lpf_alpha: 0.05,
         flip_lpf_alpha: 0.05,
         bias_residual_scale: 0.5,
+        command_lpf_tau: 0.016,
 
-        k_pos: 0.1,
-        k_vel: 1.0,
+        k_pos: 0.01,
+        k_vel: 0.1,
         max_output: 0.35,
 
         ..Default::default()
@@ -660,23 +661,22 @@ fn main() -> ! {
                             dkf.set_control_torque(tau_control);
 
                             // target_angle = 0.0 - pos_regulator.update(total_output);
-                            let angular_accel = dkf.get_angular_accel(now_angle);
-                            target_angle = 0.0;// - pos_ekf.update(total_output, ax, state.pitch, now_angle, angular_accel);
+                            // let angular_accel = dkf.get_angular_accel(now_angle);
+                            let alpha_gyro = DT / (0.02 + DT); // 50Hz LPF
+                                gyro_lpf += alpha_gyro * (state.pitch_rate - gyro_lpf);
+                            let gyro_angular_accel = (gyro_lpf - prev_gyro_lpf) / DT;
+                                prev_gyro_lpf = gyro_lpf;
+                            target_angle = 0.0 - pos_ekf.update(total_output, ax, state.pitch, now_angle, gyro_angular_accel);
 
                             if counter % PRINT_DIV == 0 {
                                 let ps = pos_ekf.state();
-                                let alpha_gyro = DT / (0.02 + DT); // 50Hz LPF
-                                    gyro_lpf += alpha_gyro * (state.pitch_rate - gyro_lpf);
-                                let gyro_angular_accel = (gyro_lpf - prev_gyro_lpf) / DT;
-                                    prev_gyro_lpf = gyro_lpf;
-                                let a_raw = (ax + libm::sinf(state.pitch)) * 9.81;
                                 udp_println!(
-                                    "{:.3},{:.3},{:.3},{:.3},{:.3}",
-                                    total_output,                    // command
-                                    gyro_angular_accel * 0.08,       // ジャイロ由来の接線加速度
-                                    angular_accel * 0.08,            // DKF由来の接線加速度（比較用）
-                                    a_raw,                           // 重力補償済み加速度
-                                    now_angle,
+                                    "{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3}",
+                                    ps.position, ps.velocity,
+                                    ps.a_target, ps.a_meas, ps.a_raw,
+                                    ps.accel, ps.bias,
+                                    ps.innovation, ps.innov_lp, ps.trust,
+                                    ps.tangential_cmd, ps.tangential_sensor,
                                 );
                             }
                         } else {

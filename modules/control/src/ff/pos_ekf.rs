@@ -1,15 +1,18 @@
 use libm::{sinf, tanhf};
 
-/// 並進位置推定EKF + レギュレータ（逆構成版）
+/// 並進位置推定EKF + レギュレータ（接線補正統合版）
 ///
 /// 【絶対遵守仕様（AIへの指示・忘却防止用）】
 /// 1. 観測加速度 a_raw の算出において、先頭にマイナス符号は絶対につけない（式: a_raw = (ax_g + sinf(pitch_sensor)) * 9.81）。
-/// 2. 接線加速度へのLPF適用は、高周波ノイズによる加速度破壊の防止に有効であるため維持する。
 ///
 /// 【構成】
-/// 予測: 加速度センサ（a_meas）を使い加速度状態を駆動
-/// 観測: -k0 * command_lp + g*sin(pitch_cg) でcommandベースの加速度を観測値として使用
-/// 閉ループ下でcommandと並進加速度が逆位相であることを反映して符号反転
+/// 予測: k0 * command_lp - I * gyro_angular_accel / (r_wheel * mass)
+///   → commandの全力から角運動に使われた分を引いた残り = 並進加速度
+/// 観測: a_raw - gyro_angular_accel * robot_radius
+///   → 加速度センサからセンサ位置の接線成分を引いた残り = 並進加速度 + bias
+///
+/// 両側でジャイロ由来の接線加速度を引くことで、予測・観測ともに並進加速度を表す。
+/// biasは観測側にのみ存在するため、カルマンフィルタでbias推定が可能。
 ///
 /// 状態: [v, x, a, b]
 ///   v:  並進速度 [m/s]
@@ -19,8 +22,13 @@ use libm::{sinf, tanhf};
 pub struct PosEkfConfig {
     pub dt: f32,
 
-    pub k0: f32,
+    pub torque_to_pwm: f32,
     pub command_lpf_tau: f32,
+
+    pub inertia: f32,
+    pub wheel_radius: f32,
+    pub mass: f32,
+    pub robot_radius: f32,
 
     pub tau_a: f32,
     pub j_max: f32,
@@ -45,10 +53,6 @@ pub struct PosEkfConfig {
     pub k_vel: f32,
     pub max_output: f32,
 
-    pub robot_radius: f32,
-    pub tangential_scale: f32,
-    pub tangential_lpf_tau: f32,
-
     pub a_max: f32,
     pub v_max: f32,
     pub accel_r_scale: f32,
@@ -60,13 +64,18 @@ impl Default for PosEkfConfig {
         Self {
             dt: 0.002,
 
-            k0: 0.053,
+            torque_to_pwm: 5000.0,
             command_lpf_tau: 0.016,
+
+            inertia: 0.002,
+            wheel_radius: 0.03,
+            mass: 0.1,
+            robot_radius: 0.08,
 
             tau_a: 1.0,
             j_max: 300.0,
 
-            r_accel: 1.0,
+            r_accel: 5.0,
             jerk_r_scale: 2.0,
 
             q_a: 0.1,
@@ -84,11 +93,7 @@ impl Default for PosEkfConfig {
 
             k_pos: 0.1,
             k_vel: 0.2,
-            max_output: 0.05,
-
-            robot_radius: 0.08,
-            tangential_scale: 0.6,
-            tangential_lpf_tau: 0.05,
+            max_output: 0.35,
 
             a_max: 5.0,
             v_max: 0.5,
@@ -110,16 +115,13 @@ pub struct PosEkfState {
     pub trust: f32,
 
     pub r_eff: f32,
-    pub jerk_meas: f32,
-    pub a_tangential: f32,
-
     pub a_meas: f32,
     pub a_raw: f32,
-    pub pitch_sensor: f32,
-    pub pitch_cg: f32,
+    pub a_target: f32,
 
     pub command_lp: f32,
-    pub z_cmd: f32,
+    pub tangential_cmd: f32,
+    pub tangential_sensor: f32,
 }
 
 pub struct PositionEkf {
@@ -136,17 +138,15 @@ pub struct PositionEkf {
     prev_innov_lp: f32,
     flip_lp: f32,
 
-    prev_a_raw: f32,
-    a_tangential_lp: f32,
+    prev_a_meas: f32,
     command_lp: f32,
 
     r_eff: f32,
-    jerk_meas: f32,
-    a_tangential: f32,
     a_meas: f32,
     a_raw: f32,
-    pitch_sensor: f32,
-    pitch_cg: f32,
+    a_target: f32,
+    tangential_cmd: f32,
+    tangential_sensor: f32,
 
     cfg: PosEkfConfig,
 }
@@ -164,9 +164,9 @@ impl PositionEkf {
             p,
             trust: 0.0,
             innovation: 0.0, innov_lp: 0.0, prev_innov_lp: 0.0, flip_lp: 0.0,
-            prev_a_raw: 0.0, a_tangential_lp: 0.0, command_lp: 0.0,
-            r_eff: cfg.r_accel, jerk_meas: 0.0, a_tangential: 0.0,
-            a_meas: 0.0, a_raw: 0.0, pitch_sensor: 0.0, pitch_cg: 0.0,
+            prev_a_meas: 0.0, command_lp: 0.0,
+            r_eff: cfg.r_accel, a_meas: 0.0, a_raw: 0.0, a_target: 0.0,
+            tangential_cmd: 0.0, tangential_sensor: 0.0,
             cfg,
         }
     }
@@ -191,31 +191,37 @@ impl PositionEkf {
         }
     }
 
-    pub fn update(&mut self, command: f32, ax_g: f32, pitch_sensor: f32, pitch_cg: f32, angular_accel: f32) -> f32 {
+    /// # Arguments
+    /// * `command` - 制御出力（total_output）
+    /// * `ax_g` - 加速度センサX軸 [G]
+    /// * `pitch_sensor` - ピッチ角（センサ位置基準）[rad]
+    /// * `pitch_cg` - ピッチ角（重心基準）[rad]
+    /// * `gyro_angular_accel` - ジャイロLPF微分による角加速度 [rad/s²]
+    pub fn update(&mut self, command: f32, ax_g: f32, pitch_sensor: f32, _pitch_cg: f32, gyro_angular_accel: f32) -> f32 {
         let dt = self.cfg.dt;
 
         // ───── 0. コマンドLPF ─────
         let alpha_cmd = Self::clamp(dt / (self.cfg.command_lpf_tau + dt + 1e-6), 0.0, 1.0);
         self.command_lp += alpha_cmd * (command - self.command_lp);
 
-        // ───── 1. 加速度センサ（予測の駆動源） ─────
+        // ───── 1. 接線加速度（ジャイロ由来、両側で使用） ─────
+        // センサ側: angular_accel * sensor距離 [m/s²]
+        let tangential_sensor = gyro_angular_accel * self.cfg.robot_radius * 0.8;
+        // コマンド側: I * angular_accel / (r_wheel * mass) [m/s²]（ログ用）
+        let tangential_cmd = self.cfg.inertia * gyro_angular_accel / (self.cfg.wheel_radius * self.cfg.mass);
+        self.tangential_sensor = tangential_sensor;
+        self.tangential_cmd = tangential_cmd;
+
+        // ───── 2. 観測（センサ側の並進加速度） ─────
         // 【絶対遵守仕様】マイナス符号なしで計算
         let a_raw = (ax_g + sinf(pitch_sensor)) * 9.81;
+        let a_meas = -(a_raw + tangential_sensor);
 
-        // 接線加速度補正
-        let raw_a_tangential = angular_accel * self.cfg.robot_radius * self.cfg.tangential_scale;
-        let alpha_tan = Self::clamp(dt / (self.cfg.tangential_lpf_tau + dt + 1e-6), 0.0, 1.0);
-        self.a_tangential_lp += alpha_tan * (raw_a_tangential - self.a_tangential_lp);
+        self.a_raw = a_raw;
+        self.a_meas = a_meas;
 
-        let a_meas = a_raw + self.a_tangential_lp;
-        self.a_tangential = self.a_tangential_lp;
-
-        self.a_meas = a_meas; self.a_raw = a_raw;
-        self.pitch_sensor = pitch_sensor; self.pitch_cg = pitch_cg;
-
-        // ───── 2. jerk・adaptive R（command観測の信頼度） ─────
-        let j_meas = (a_raw - self.prev_a_raw) / dt;
-        self.jerk_meas = j_meas;
+        // ───── 3. adaptive R ─────
+        let j_meas = (a_meas - self.prev_a_meas) / dt;
         let jerk_ratio = j_meas.abs() / (self.cfg.j_max + 1e-6);
         let a_ratio = self.a.abs() / (self.cfg.a_max + 1e-6);
         let v_ratio = self.v.abs() / (self.cfg.v_max + 1e-6);
@@ -226,19 +232,29 @@ impl PositionEkf {
             + self.cfg.vel_r_scale * (v_ratio * v_ratio);
         self.r_eff = self.cfg.r_accel * r_scale;
 
-        // ───── 3. trustとプロセスノイズ ─────
+        // ───── 4. trustとプロセスノイズ ─────
         let tau_b = Self::lerp(self.cfg.tau_b_min, self.cfg.tau_b_max, self.trust);
         let beta_b = dt / (tau_b + dt + 1e-6);
         let psi_b = 1.0 - beta_b;
         let q_b = Self::lerp(self.cfg.q_b_min, self.cfg.q_b_max, self.trust);
 
-        // ───── 4. 状態予測（加速度センサ駆動） ─────
+        // ───── 5. 状態予測（command - 角運動分 = 並進加速度） ─────
+        // τ_total = command_lp / torque_to_pwm             [Nm]
+        // τ_angular = I * gyro_angular_accel               [Nm]
+        // commandと角加速度は負の相関（反作用）のため、加算で角運動分が差し引かれる
+        // τ_trans = τ_total + τ_angular                    [Nm]
+        // a_target = τ_trans / (r_wheel * mass)            [m/s²]
+        let tau_total = self.command_lp / self.cfg.torque_to_pwm;
+        let tau_angular = self.cfg.inertia * gyro_angular_accel * 0.8;
+        let a_target = (tau_total - tau_angular) / (self.cfg.wheel_radius * self.cfg.mass);
+        self.a_target = a_target;
+
         let alpha_a_nom = Self::clamp(dt / (self.cfg.tau_a + dt + 1e-6), 0.0, 1.0);
-        let mut da = alpha_a_nom * (a_meas - self.a);
+        let mut da = alpha_a_nom * (a_target - self.a);
         let da_max = self.cfg.j_max * dt;
         da = Self::clamp(da, -da_max, da_max);
 
-        let denom = a_meas - self.a;
+        let denom = a_target - self.a;
         let alpha_a = if denom.abs() > 1e-9 { (da / denom).abs() } else { 0.0 };
         let alpha_a = Self::clamp(alpha_a, 0.0, alpha_a_nom);
 
@@ -247,7 +263,7 @@ impl PositionEkf {
         self.x += self.v * dt;
         self.b *= psi_b;
 
-        // ───── 5. 共分散予測 ─────
+        // ───── 6. 共分散予測 ─────
         let phi = 1.0 - alpha_a;
 
         let mut f = [[0.0f32; 4]; 4];
@@ -281,11 +297,8 @@ impl PositionEkf {
         Self::symmetrize(&mut p_pred);
         self.p = p_pred;
 
-        // ───── 6. 観測更新（command） ─────
-        let gravity_comp = 9.81 * sinf(pitch_cg);
-        let z_cmd = -self.cfg.k0 * self.command_lp + gravity_comp;
-
-        self.innovation = z_cmd - (self.a + self.b);
+        // ───── 7. 観測更新 ─────
+        self.innovation = a_meas - (self.a + self.b);
 
         self.prev_innov_lp = self.innov_lp;
         self.innov_lp += self.cfg.innov_lpf_alpha * (self.innovation - self.innov_lp);
@@ -349,25 +362,22 @@ impl PositionEkf {
         Self::symmetrize(&mut p_new);
         self.p = p_new;
         self.trust = trust_next;
-        self.prev_a_raw = a_raw;
+        self.prev_a_meas = a_meas;
 
-        // ───── 7. レギュレータ出力 ─────
+        // ───── 8. レギュレータ出力 ─────
         let raw = self.cfg.k_pos * self.x + self.cfg.k_vel * self.v;
         self.cfg.max_output * tanhf(raw / self.cfg.max_output)
     }
 
     pub fn state(&self) -> PosEkfState {
-        let gravity_comp = 9.81 * sinf(self.pitch_cg);
-        let z = -self.cfg.k0 * self.command_lp + gravity_comp;
-
         PosEkfState {
             velocity: self.v, position: self.x, accel: self.a, bias: self.b,
             innovation: self.innovation, innov_lp: self.innov_lp, trust: self.trust,
-            r_eff: self.r_eff, jerk_meas: self.jerk_meas, a_tangential: self.a_tangential,
-            a_meas: self.a_meas, a_raw: self.a_raw, pitch_sensor: self.pitch_sensor,
-            pitch_cg: self.pitch_cg,
+            r_eff: self.r_eff, a_meas: self.a_meas, a_raw: self.a_raw,
+            a_target: self.a_target,
             command_lp: self.command_lp,
-            z_cmd: z,
+            tangential_cmd: self.tangential_cmd,
+            tangential_sensor: self.tangential_sensor,
         }
     }
 
@@ -376,8 +386,8 @@ impl PositionEkf {
         self.p = [[0.0; 4]; 4];
         self.p[0][0] = 0.01; self.p[1][1] = 0.01; self.p[2][2] = 0.5; self.p[3][3] = 0.1;
         self.trust = 0.0; self.innovation = 0.0; self.innov_lp = 0.0; self.prev_innov_lp = 0.0; self.flip_lp = 0.0;
-        self.prev_a_raw = 0.0; self.a_tangential_lp = 0.0; self.command_lp = 0.0;
-        self.r_eff = self.cfg.r_accel; self.jerk_meas = 0.0; self.a_tangential = 0.0;
-        self.a_meas = 0.0; self.a_raw = 0.0; self.pitch_sensor = 0.0; self.pitch_cg = 0.0;
+        self.prev_a_meas = 0.0; self.command_lp = 0.0;
+        self.r_eff = self.cfg.r_accel; self.a_meas = 0.0; self.a_raw = 0.0; self.a_target = 0.0;
+        self.tangential_cmd = 0.0; self.tangential_sensor = 0.0;
     }
 }
