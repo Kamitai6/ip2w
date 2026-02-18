@@ -133,7 +133,7 @@ const PERIOD_US: u64 = 1_000_000 / FREQUENCY as u64;
 const DT: f32 = 1.0 / FREQUENCY as f32;
 const U_MAX: f32 = 300.0;
 /// トルク → PWM変換係数 [PWM/Nm]
-const TORQUE_TO_PWM: f32 = 5000.0;
+const TORQUE_TO_PWM: f32 = 10000.0;
 /// PWM → トルク変換係数 [Nm/PWM]
 const PWM_TO_TORQUE: f32 = 1.0 / TORQUE_TO_PWM;
 /// ピッチオフセット [rad]（重心バランス点）
@@ -526,36 +526,31 @@ fn main() -> ! {
         dt: DT,
 
         torque_to_pwm: TORQUE_TO_PWM,
+        inertia: 0.000363,
         wheel_radius: 0.03,
         mass: 0.1,
-        inertia: 0.000363,
         robot_radius: 0.08,
 
-        tau_a: 1.0,
-        r_accel: 10.0,
+        j_max: 400.0,
+        a_max: 50.0,
+        v_max: 5.0,
 
-        j_max: 300.0,
-        a_max: 5.0,
-        v_max: 0.5,
-        jerk_r_scale: 2.0,
-        accel_r_scale: 2.0,
-        vel_r_scale: 2.0,
-
-        q_a: 0.1,
-        q_v: 1e-5,
-        q_b_max: 1e-5,
-        q_b_min: 1e-10,
-
-        tau_b_min: 1.0,
-        tau_b_max: 100.0,
-
-        innov_lpf_alpha: 0.05,
-        flip_lpf_alpha: 0.05,
-        bias_residual_scale: 0.5,
         command_lpf_tau: 0.016,
+        sign_lpf_tau: 0.4,
+        tau_a_min: 0.1,
+        tau_a_max: 10.0,
+        innov_tau_scale: 0.0,
 
-        k_pos: 0.01,
-        k_vel: 0.1,
+        r_accel: 1.0,
+        constraint_r_scale: 2.0,
+
+        q_a: 1e-2,
+        q_v: 1e-5,
+        q_b_min: 1e-10,
+        q_b_max: 1e-5,
+
+        k_pos: 0.1,
+        k_vel: 0.01,
         max_output: 0.35,
 
         ..Default::default()
@@ -629,7 +624,7 @@ fn main() -> ! {
                         }
                         button_state = button.is_low();
 
-                        if state.roll.abs() > 1.0 || state.pitch.abs() > 1.0 {
+                        if state.roll.abs() > 0.5 || state.pitch.abs() > 0.5 {
                             drive = false;
                         }
 
@@ -671,12 +666,14 @@ fn main() -> ! {
                             if counter % PRINT_DIV == 0 {
                                 let ps = pos_ekf.state();
                                 udp_println!(
-                                    "{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3}",
-                                    ps.position, ps.velocity,
-                                    ps.a_target, ps.a_meas, ps.a_raw,
-                                    ps.accel, ps.bias,
-                                    ps.innovation, ps.innov_lp, ps.trust,
-                                    ps.tangential_cmd, ps.tangential_sensor,
+                                    "{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3}",
+                                    ps.position, ps.velocity,           // 0,1: 位置推定
+                                    ps.a_target, ps.a_meas, ps.a_raw,   // 2,3,4: 加速度比較
+                                    ps.accel, ps.bias,                   // 5,6: EKF内部状態
+                                    ps.innovation, ps.sign_agree_lp,     // 7,8: 適応指標
+                                    ps.r_eff,                            // 9: 観測ノイズ
+                                    ps.tangential_cmd, ps.tangential_sensor, // 10,11: 接線補正
+                                    ps.command_lp,                       // 12: コマンド
                                 );
                             }
                         } else {
