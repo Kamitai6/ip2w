@@ -539,15 +539,15 @@ fn main() -> ! {
         command_lpf_tau: 0.016,
         sign_lpf_tau: 0.4,
 
-        r_accel: 1.0,
+        r_accel: 0.1,
         constraint_r_scale: 2.0,
 
-        q_a_min: 1e-2,
-        q_a_max: 1.0,
+        q_a_min: 10.0,
+        q_a_max: 100.0,
         q_v: 1e-5,
         q_x: 1e-6,
-        q_b_min: 1e-10,
-        q_b_max: 1e-5,
+        q_b_min: 1e-5,
+        q_b_max: 1e-2,
 
         k_pos: 0.1,
         k_vel: 0.1,
