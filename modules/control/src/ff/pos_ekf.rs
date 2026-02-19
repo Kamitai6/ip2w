@@ -1,23 +1,23 @@
 use libm::{sinf, tanhf};
 
-/// 並進位置推定EKF + レギュレータ（v5: 簡素化版）
+/// 並進位置推定EKF + レギュレータ（v6: 標準EKF構成）
 ///
 /// 【絶対遵守仕様（AIへの指示・忘却防止用）】
 /// 1. 観測加速度 a_raw の算出において、先頭にマイナス符号は絶対につけない（式: a_raw = (ax_g + sinf(pitch_sensor)) * 9.81）。
 ///    ただし、a_measの符号反転は物理モデルに基づく座標変換であり、上記仕様とは独立。
 ///
-/// 【構成】
-/// 予測: (command_lp / torque_to_pwm - I * gyro_α * 0.8) / (r_wheel * mass)
-/// 観測: -(a_raw + gyro_α * robot_radius * 0.8)
+/// 【v5→v6 変更】
+/// - tau_a廃止: a = a_target直接設定（jerk/accel/vel制限は維持）
+/// - commandモデルの不確かさはQ（q_a）で表現（標準的EKF）
+/// - q_aをsign_agreeで適応化（sign低→q_a大→観測優先、sign高→q_a小→予測優先）
+/// - q_x追加: positionにもプロセスノイズ
 ///
-/// 予測・観測ともにジャイロ由来の接線補正を適用し、並進加速度を推定。
-/// sign_agree（予測と観測のjerk符号一致度）でcommand追従速度とbias学習を制御。
+/// 【構成】
+/// 予測: a = (command_lp / torque_to_pwm - I * gyro_α * 0.8) * eff / (r * m)
+/// 観測: z = -(a_raw + gyro_α * robot_radius * 0.8)
+/// innovation = z - (a + b)
 ///
 /// 状態: [v, x, a, b]
-///   v:  並進速度 [m/s]
-///   x:  並進位置 [m]
-///   a:  真の並進加速度（内部状態） [m/s²]
-///   b:  観測側合成バイアス [m/s²]（ランダムウォークモデル、減衰なし）
 pub struct PosEkfConfig {
     // ── 物理 ──
     pub dt: f32,                  // サンプリング周期 [s]
@@ -28,11 +28,9 @@ pub struct PosEkfConfig {
     pub robot_radius: f32,        // 回転軸からセンサまでの距離 [m]
     pub motor_efficiency: f32,    // モーター効率（0〜1）
 
-    // ── 入力フィルタ・予測追従 ──
+    // ── 入力フィルタ ──
     pub command_lpf_tau: f32,     // command LPF時定数 [s]
     pub sign_lpf_tau: f32,        // sign_agreeのLPF時定数 [s]
-    pub tau_a_min: f32,           // command追従時定数（sign高：速い）[s]
-    pub tau_a_max: f32,           // command追従時定数（sign低：遅い）[s]
 
     // ── ハードウェア制約 ──
     pub j_max: f32,               // 最大ジャーク [m/s³]
@@ -44,8 +42,10 @@ pub struct PosEkfConfig {
     pub constraint_r_scale: f32,  // 制約超過時のR増大係数
 
     // ── プロセスノイズ ──
-    pub q_a: f32,                 // 加速度の不確実性
+    pub q_a_min: f32,             // 加速度Q（sign高：予測信頼）
+    pub q_a_max: f32,             // 加速度Q（sign低：予測不信頼→観測優先）
     pub q_v: f32,                 // 速度の不確実性
+    pub q_x: f32,                 // 位置の不確実性
     pub q_b_min: f32,             // bias学習ノイズ（sign低：抑制）
     pub q_b_max: f32,             // bias学習ノイズ（sign高：学習）
 
@@ -68,23 +68,23 @@ impl Default for PosEkfConfig {
             motor_efficiency: 0.5,
 
             command_lpf_tau: 0.016,
-            sign_lpf_tau: 0.2,
-            tau_a_min: 0.1,
-            tau_a_max: 10.0,
+            sign_lpf_tau: 0.4,
 
-            j_max: 300.0,
-            a_max: 5.0,
-            v_max: 0.5,
+            j_max: 400.0,
+            a_max: 50.0,
+            v_max: 5.0,
 
-            r_accel: 10.0,
+            r_accel: 1.0,
             constraint_r_scale: 2.0,
 
-            q_a: 0.1,
+            q_a_min: 1e-2,
+            q_a_max: 1.0,
             q_v: 1e-5,
+            q_x: 1e-6,
             q_b_min: 1e-10,
             q_b_max: 1e-5,
 
-            k_pos: 0.01,
+            k_pos: 0.1,
             k_vel: 0.1,
             max_output: 0.35,
         }
@@ -110,7 +110,7 @@ pub struct PosEkfState {
     pub tangential_cmd: f32,
     pub tangential_sensor: f32,
 
-    pub tau_a: f32,
+    pub q_a: f32,
     pub q_b: f32,
     pub k_gain_a: f32,
     pub k_gain_b: f32,
@@ -137,7 +137,7 @@ pub struct PositionEkf {
     a_target: f32,
     tangential_cmd: f32,
     tangential_sensor: f32,
-    tau_a_actual: f32,
+    q_a_actual: f32,
     q_b_actual: f32,
     k_gain_a: f32,
     k_gain_b: f32,
@@ -161,7 +161,7 @@ impl PositionEkf {
             prev_a_meas: 0.0, prev_a_target: 0.0, command_lp: 0.0,
             r_eff: cfg.r_accel, a_meas: 0.0, a_raw: 0.0, a_target: 0.0,
             tangential_cmd: 0.0, tangential_sensor: 0.0,
-            tau_a_actual: cfg.tau_a_max, q_b_actual: cfg.q_b_min,
+            q_a_actual: cfg.q_a_max, q_b_actual: cfg.q_b_min,
             k_gain_a: 0.0, k_gain_b: 0.0,
             cfg,
         }
@@ -234,29 +234,30 @@ impl PositionEkf {
             + self.cfg.constraint_r_scale * (jerk_ratio * jerk_ratio + a_ratio * a_ratio + v_ratio * v_ratio);
         self.r_eff = self.cfg.r_accel * r_scale;
 
-        // ───── 6. sign_agree連動パラメータ ─────
-        let tau_a = Self::lerp(self.cfg.tau_a_min, self.cfg.tau_a_max, 1.0 - self.sign_agree_lp);
+        // ───── 6. sign_agree連動プロセスノイズ ─────
+        // sign低 → q_a大 → command予測を信頼しない → 観測優先
+        let q_a = Self::lerp(self.cfg.q_a_min, self.cfg.q_a_max, 1.0 - self.sign_agree_lp);
+        // sign高 → q_b大 → bias学習促進
         let q_b = Self::lerp(self.cfg.q_b_min, self.cfg.q_b_max, self.sign_agree_lp);
-        self.tau_a_actual = tau_a;
+        self.q_a_actual = q_a;
         self.q_b_actual = q_b;
 
-        // ───── 7. 状態予測 ─────
-        let alpha_a_nom = Self::clamp(dt / (tau_a + dt + 1e-6), 0.0, 1.0);
-        let mut da = alpha_a_nom * (a_target - self.a);
+        // ───── 7. 状態予測（a = a_target直接、jerk/accel/vel制限あり） ─────
+        let mut da = a_target - self.a;
         let da_max = self.cfg.j_max * dt;
+        let jerk_limited = da.abs() > da_max;
         da = Self::clamp(da, -da_max, da_max);
 
-        let denom = a_target - self.a;
-        let alpha_a = if denom.abs() > 1e-9 { (da / denom).abs() } else { 0.0 };
-        let alpha_a = Self::clamp(alpha_a, 0.0, alpha_a_nom);
-
         self.a += da;
+        self.a = Self::clamp(self.a, -self.cfg.a_max, self.cfg.a_max);
         self.v += self.a * dt;
+        self.v = Self::clamp(self.v, -self.cfg.v_max, self.cfg.v_max);
         self.x += self.v * dt;
         // biasは減衰なし（ランダムウォーク）
 
         // ───── 8. 共分散予測 ─────
-        let phi = 1.0 - alpha_a;
+        // F[2][2]: jerk制限中は1（前回のaに依存）、非制限時は0（a_targetに完全追従）
+        let phi = if jerk_limited { 1.0 } else { 0.0 };
 
         let mut f = [[0.0f32; 4]; 4];
         f[0][0] = 1.0; f[0][2] = dt;
@@ -266,7 +267,8 @@ impl PositionEkf {
 
         let mut q = [[0.0f32; 4]; 4];
         q[0][0] = self.cfg.q_v * dt;
-        q[2][2] = self.cfg.q_a * dt;
+        q[1][1] = self.cfg.q_x * dt;
+        q[2][2] = q_a * dt;
         q[3][3] = q_b * dt;
 
         let p0 = self.p;
@@ -358,7 +360,7 @@ impl PositionEkf {
             a_meas: self.a_meas, a_raw: self.a_raw, a_target: self.a_target,
             command_lp: self.command_lp,
             tangential_cmd: self.tangential_cmd, tangential_sensor: self.tangential_sensor,
-            tau_a: self.tau_a_actual, q_b: self.q_b_actual,
+            q_a: self.q_a_actual, q_b: self.q_b_actual,
             k_gain_a: self.k_gain_a, k_gain_b: self.k_gain_b,
         }
     }
@@ -371,7 +373,7 @@ impl PositionEkf {
         self.prev_a_meas = 0.0; self.prev_a_target = 0.0; self.command_lp = 0.0;
         self.r_eff = self.cfg.r_accel; self.a_meas = 0.0; self.a_raw = 0.0; self.a_target = 0.0;
         self.tangential_cmd = 0.0; self.tangential_sensor = 0.0;
-        self.tau_a_actual = self.cfg.tau_a_max; self.q_b_actual = self.cfg.q_b_min;
+        self.q_a_actual = self.cfg.q_a_max; self.q_b_actual = self.cfg.q_b_min;
         self.k_gain_a = 0.0; self.k_gain_b = 0.0;
     }
 }

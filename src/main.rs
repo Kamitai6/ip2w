@@ -538,19 +538,19 @@ fn main() -> ! {
 
         command_lpf_tau: 0.016,
         sign_lpf_tau: 0.4,
-        tau_a_min: 0.01,
-        tau_a_max: 1.0,
 
         r_accel: 1.0,
         constraint_r_scale: 2.0,
 
-        q_a: 1e-2,
+        q_a_min: 1e-2,
+        q_a_max: 1.0,
         q_v: 1e-5,
+        q_x: 1e-6,
         q_b_min: 1e-10,
         q_b_max: 1e-5,
 
         k_pos: 0.1,
-        k_vel: 0.01,
+        k_vel: 0.1,
         max_output: 0.35,
 
         ..Default::default()
@@ -666,12 +666,12 @@ fn main() -> ! {
                             if counter % PRINT_DIV == 0 {
                                 let ps = pos_ekf.state();
                                 udp_println!(
-                                    "{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.4},{:.4},{:.6},{:.3}",
+                                    "{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.4},{:.4},{:.6},{:.3}",
                                     ps.position, ps.velocity,           // 0,1
                                     ps.a_target, ps.a_meas, ps.a_raw,   // 2,3,4
                                     ps.accel, ps.bias,                   // 5,6
                                     ps.innovation, ps.sign_agree_lp,     // 7,8
-                                    ps.r_eff, ps.tau_a,                  // 9,10
+                                    ps.r_eff,                   // 9,
                                     ps.tangential_cmd, ps.tangential_sensor, // 11,12
                                     ps.k_gain_a, ps.k_gain_b,           // 13,14
                                     ps.q_b,                              // 15
