@@ -541,13 +541,14 @@ fn main() -> ! {
 
         r_accel: 0.1,
         constraint_r_scale: 2.0,
+        r_pos: 0.1,
 
-        q_a_min: 10.0,
-        q_a_max: 100.0,
+        q_a_min: 0.1,
+        q_a_max: 1.0,
         q_v: 1e-5,
         q_x: 1e-6,
-        q_b_min: 1e-5,
-        q_b_max: 1e-2,
+        q_b_min: 0.1,
+        q_b_max: 1.0,
 
         k_pos: 0.1,
         k_vel: 0.1,
@@ -666,7 +667,7 @@ fn main() -> ! {
                             if counter % PRINT_DIV == 0 {
                                 let ps = pos_ekf.state();
                                 udp_println!(
-                                    "{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.4},{:.4},{:.6},{:.3}",
+                                    "{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.4},{:.4},{:.6},{:.3},{:.3}",
                                     ps.position, ps.velocity,           // 0,1
                                     ps.a_target, ps.a_meas, ps.a_raw,   // 2,3,4
                                     ps.accel, ps.bias,                   // 5,6
@@ -676,6 +677,7 @@ fn main() -> ! {
                                     ps.k_gain_a, ps.k_gain_b,           // 13,14
                                     ps.q_b,                              // 15
                                     ps.command_lp,                       // 16
+                                    ps.innovation_pos,//17
                                 );
                             }
                         } else {
