@@ -537,17 +537,17 @@ fn main() -> ! {
         v_max: 5.0,
 
         command_lpf_tau: 0.016,
-        sign_lpf_tau: 0.4,
+        sign_lpf_tau: 0.1,
 
-        r_accel: 0.1,
+        r_accel: 1000.0,
         constraint_r_scale: 2.0,
         r_pos: 0.01,
 
         // プロセス（予測）ノイズ
-        q_a_min: 10.0,
-        q_a_max: 100.0,
-        q_v: 1e-5,
-        q_x: 1e-6,
+        q_a_min: 1.0,
+        q_a_max: 10.0,
+        q_v: 1e-3,
+        q_x: 1e-4,
 
         k_pos: 0.01,
         k_vel: 0.1,
