@@ -1,15 +1,16 @@
-use libm::{sinf, tanhf};
+use libm::{sinf, cosf, tanhf};
 
-/// 並進位置推定EKF + レギュレータ（v6e: 3状態 + position観測）
+/// 並進位置推定EKF + レギュレータ（v7: ワールド座標変換修正）
+///
+/// 【v6e→v7 変更】
+/// - a_rawの計算にaz_gとcos(pitch)を追加し、ボディ→ワールド座標変換を正しく実施
+/// - 旧: a_raw = (ax_g + sinf(pitch_sensor)) * 9.81
+/// - 新: a_raw = (cosf(pitch_sensor) * ax_g + sinf(pitch_sensor) * az_g) * 9.81
+/// - 重力成分は代数的に消える（separate除去不要）
 ///
 /// 【絶対遵守仕様（AIへの指示・忘却防止用）】
-/// 1. 観測加速度 a_raw の算出において、先頭にマイナス符号は絶対につけない（式: a_raw = (ax_g + sinf(pitch_sensor)) * 9.81）。
-///    ただし、a_measの符号反転は物理モデルに基づく座標変換であり、上記仕様とは独立。
-///
-/// 【v6d→v6e 変更：bias除去・3状態化】
-/// - bias推定を除去（commandにも加速度センサにも系統的biasなし → 推定は害を及ぼす）
-/// - 位置ドリフトの原因はノイズの二重積分による確率的ランダムウォーク
-/// - position観測(z=0)でドリフトを直接抑制（biasを学習するためではない）
+/// 1. a_rawの式は上記の通り。符号変更禁止。
+/// 2. a_measの符号反転は物理モデルに基づく座標変換であり、上記仕様とは独立。
 ///
 /// 状態: [v, x, a]（3状態）
 ///   v: 並進速度 [m/s]
@@ -235,10 +236,11 @@ impl PositionEkf {
     /// # Arguments
     /// * `command` - 制御出力（total_output）
     /// * `ax_g` - 加速度センサX軸 [G]
+    /// * `az_g` - 加速度センサZ軸 [G]
     /// * `pitch_sensor` - ピッチ角（センサ位置基準）[rad]
     /// * `pitch_cg` - ピッチ角（重心基準）[rad]（未使用）
     /// * `gyro_angular_accel` - ジャイロLPF微分による角加速度 [rad/s²]
-    pub fn update(&mut self, command: f32, ax_g: f32, pitch_sensor: f32, _pitch_cg: f32, gyro_angular_accel: f32) -> f32 {
+    pub fn update(&mut self, command: f32, ax_g: f32, az_g: f32, pitch_sensor: f32, _pitch_cg: f32, gyro_angular_accel: f32) -> f32 {
         let dt = self.cfg.dt;
 
         // ───── 0. コマンドLPF ─────
@@ -252,7 +254,8 @@ impl PositionEkf {
         self.tangential_cmd = tangential_cmd / (self.cfg.wheel_radius * self.cfg.mass);
 
         // ───── 2. 観測（センサ側の並進加速度） ─────
-        let a_raw = (ax_g + sinf(pitch_sensor)) * 9.81;
+        // v7: ボディ→ワールド座標変換（重力は代数的に消える）
+        let a_raw = (cosf(pitch_sensor) * ax_g + sinf(pitch_sensor) * az_g) * 9.81;
         let a_meas = -(a_raw + tangential_sensor);
         self.a_raw = a_raw;
         self.a_meas = a_meas;

@@ -616,6 +616,7 @@ fn main() -> ! {
                             // info!("m=({},{},{})", mc, my, mz);
                             // info!("r={}, {}, {}", state.roll, state.pitch, state.yaw);
                             // info!("ax={}, g={}, accel={}", ax, libm::sinf(state.pitch), (ax + libm::sinf(state.pitch)) * 9.81);
+                            // defmt::info!("{}, {}, {}", az, libm::cosf(state.pitch), (az - libm::cosf(state.pitch)) * 9.81);
                         }
                         counter += 1;
 
@@ -661,7 +662,7 @@ fn main() -> ! {
                                 gyro_lpf += alpha_gyro * (state.pitch_rate - gyro_lpf);
                             let gyro_angular_accel = (gyro_lpf - prev_gyro_lpf) / DT;
                                 prev_gyro_lpf = gyro_lpf;
-                            target_angle = 0.0 - pos_ekf.update(total_output.clamp(-U_MAX, U_MAX), ax, state.pitch, now_angle, gyro_angular_accel);
+                            target_angle = 0.0 - pos_ekf.update(total_output.clamp(-U_MAX, U_MAX), ax, az, state.pitch, now_angle, gyro_angular_accel);
 
                             if counter % PRINT_DIV == 0 {
                                 let ps = pos_ekf.state();
