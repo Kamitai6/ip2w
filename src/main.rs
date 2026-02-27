@@ -526,11 +526,14 @@ fn main() -> ! {
         dt: DT,
 
         torque_to_pwm: TORQUE_TO_PWM,
-        inertia: 0.000363,
-        wheel_radius: 0.03,
-        mass: 0.1,
-        robot_radius: 0.08,
         motor_efficiency: 0.5,
+        wheel_radius: 0.03,
+        m_p: 0.1,
+        m_w: 0.023,
+        i_p: 0.000363,
+        i_w: 0.00001035, //0.5*0.023*0.03^2
+        l: 0.035,
+        robot_radius: 0.08,
 
         j_max: 400.0,
         a_max: 50.0,
@@ -662,18 +665,18 @@ fn main() -> ! {
                                 gyro_lpf += alpha_gyro * (state.pitch_rate - gyro_lpf);
                             let gyro_angular_accel = (gyro_lpf - prev_gyro_lpf) / DT;
                                 prev_gyro_lpf = gyro_lpf;
-                            target_angle = 0.0 - pos_ekf.update(total_output.clamp(-U_MAX, U_MAX), ax, az, state.pitch, now_angle, gyro_angular_accel);
+                            target_angle = 0.0 - pos_ekf.update(total_output.clamp(-U_MAX, U_MAX), ax, az, state.pitch, now_angle, state.pitch_rate, gyro_angular_accel);
 
                             if counter % PRINT_DIV == 0 {
                                 let ps = pos_ekf.state();
                                 udp_println!(
-                                    "{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.4},{:.4},{:.3},{:.3}",
+                                    "{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.4},{:.4},{:.3},{:.3}",
                                     ps.position, ps.velocity,           // 0,1
                                     ps.a_target, ps.a_meas, ps.a_raw,   // 2,3,4
                                     ps.accel,                   // 5,
                                     ps.innovation, ps.sign_agree_lp,     // 7,8
                                     ps.r_eff,                   // 9,
-                                    ps.tangential_cmd, ps.tangential_sensor, // 11,12
+                                    ps.tangential_sensor, // 12
                                     ps.k_gain_a, ps.k_gain_pos,           // 13,14
                                     ps.command_lp,                       // 16
                                     ps.innovation_pos,//17
