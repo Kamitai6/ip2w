@@ -537,7 +537,8 @@ fn main() -> ! {
         i_p: 0.000363,
         i_w: 0.00001035, //0.5*0.023*0.03^2
         l: 0.035,
-        robot_radius: 0.08,
+        imu_rx: 0.01,
+        imu_rz: 0.08,
 
         j_max: 400.0,
         a_max: 50.0,
@@ -624,6 +625,7 @@ fn main() -> ! {
                             // info!("r={}, {}, {}", state.roll, state.pitch, state.yaw);
                             // info!("ax={}, g={}, accel={}", ax, libm::sinf(state.pitch), (ax + libm::sinf(state.pitch)) * 9.81);
                             // defmt::info!("{}, {}, {}", az, libm::cosf(state.pitch), (az - libm::cosf(state.pitch)) * 9.81);
+                            // defmt::info!("{}, {}", (ax * libm::cosf(state.pitch)) - (az * libm::sinf(state.pitch)), (ax * libm::cosf(state.pitch)) + (az * libm::sinf(state.pitch)));
                         }
                         counter += 1;
 
@@ -674,20 +676,22 @@ fn main() -> ! {
                             if counter % PRINT_DIV == 0 {
                                 let ps = pos_ekf.state();
                                 udp_println!(
-                                    "{:.3},{:.3},{:.3},{:.3},{:.3},{:.6},{:.3},{:.3},{:.3},{:.3},{:.4},{:.4},{:.3}",
-                                    ps.position,        // 0
-                                    ps.velocity,        // 1
-                                    ps.a_target,        // 2
-                                    ps.a_meas,          // 3
-                                    ps.accel,           // 4
-                                    ps.tau_eff,         // 5  (Nm, 小さい値なので6桁)
-                                    ps.command_lp,      // 6
-                                    ps.innovation,      // 7
-                                    ps.sign_agree_lp,   // 8
-                                    ps.r_eff,           // 9
-                                    ps.k_gain_a,        // 10
-                                    ps.k_gain_pos,      // 11
-                                    ps.innovation_pos,  // 12
+                                    "{:.3},{:.3},{:.3},{:.3},{:.3},{:.6},{:.3},{:.3},{:.3},{:.3},{:.4},{:.4},{:.3},{:.3},{:.3}",
+                                    ps.position,          // 0
+                                    ps.velocity,          // 1
+                                    ps.a_target,          // 2
+                                    ps.a_meas,            // 3
+                                    ps.accel,             // 4
+                                    ps.tau_eff,           // 5
+                                    ps.command_lp,        // 6
+                                    ps.innovation,        // 7
+                                    ps.sign_agree_lp,     // 8
+                                    ps.r_eff,             // 9
+                                    ps.k_gain_a,          // 10
+                                    ps.k_gain_pos,        // 11
+                                    ps.innovation_pos,    // 12
+                                    ps.tangential_sensor, // 13 (項3: 接線)
+                                    ps.a_centripetal,     // 14 (項4: 遠心)
                                 );
                             }
                         } else {

@@ -1,27 +1,25 @@
 use libm::{sinf, cosf, tanhf};
 
-/// 並進位置推定EKF + レギュレータ（v9: DCモーターモデルによるトルク推定）
+/// 並進位置推定EKF + レギュレータ（v9b: DCモーターモデル + 完全IMU物理モデル）
 ///
-/// 【v8→v9 変更】
-/// - τ_effの計算を、datasheetベースのDCモーターモデルに変更。
-///   旧: τ_eff = (command_lp / torque_to_pwm) * motor_efficiency
-///   新: τ_eff = motor_efficiency * k_tau * V_applied - k_b * ω_wheel
-///        V_applied = v_batt * (command_lp / pwm_max)
-///        ω_wheel = v / wheel_radius （EKF推定速度から）
+/// 【v9→v9b 変更】
+/// - a_meas（観測側）の計算を完全な物理モデルに変更。
+///   旧: a_raw = (cosθ*ax + sinθ*az)*9.81, a_meas = -(a_raw + tangential_sensor)
+///   新: v̇ = (ax cosθ + az sinθ)*9.81                        ... 項1: 重力自動キャンセル
+///          + θ̈*(rx sinθ - rz cosθ)                           ... 項3: 接線加速度
+///          + θ̇²*(rx cosθ + rz sinθ)                          ... 項4: 遠心加速度
+///        a_meas = -v̇  （既存符号規約維持）
 ///
-///   k_tau: 出力軸トルク定数 [Nm/V]（datasheet: τ_stall / V）
-///   k_b:   逆起電力トルク係数 [Nm·s/rad]（datasheet: τ_stall / ω_noload）
+///   rx: ホイール回転軸→IMU の前方オフセット [m]
+///   rz: ホイール回転軸→IMU の上方オフセット [m]
+///   （ロボット完全直立・IMU座標=世界座標時の定義）
 ///
-///   motor_efficiency < 1 → 駆動トルクを減らす方向（a_target縮小）
-///
-/// - configからtorque_to_pwmを廃止、k_tau, k_b, v_batt, pwm_maxを追加。
-/// - 連立方程式(compute_translational_accel)は変更なし。
-/// - PosEkfStateにtau_effを追加（デバッグ用）。
+/// - configからrobot_radiusを廃止、imu_rx, imu_rzを追加。
+/// - PosEkfStateにa_centripetal追加（デバッグ用）。
 ///
 /// 【絶対遵守仕様（AIへの指示・忘却防止用）】
-/// 1. a_rawの式は v7と同じ。符号変更禁止。
-///    a_raw = (cosf(pitch_sensor) * ax_g + sinf(pitch_sensor) * az_g) * 9.81
-/// 2. a_measの符号反転は物理モデルに基づく座標変換であり、上記仕様とは独立。
+/// 1. a_measの全体符号反転（a_meas = -v̇）は既存規約。変更禁止。
+/// 2. v̇の式は実験で検証済み（+版が静止時0になることを確認）。
 ///
 /// 状態: [v, x, a]（3状態）
 ///   v: 並進速度 [m/s]
@@ -45,7 +43,8 @@ pub struct PosEkfConfig {
     pub i_p: f32,              // 胴体の慣性モーメント [kg·m²]
     pub i_w: f32,              // ホイールの慣性モーメント [kg·m²]（両輪合計）
     pub l: f32,                // 回転軸から胴体重心までの距離 [m]
-    pub robot_radius: f32,     // IMU取付位置の回転半径 [m]（tangential_sensor用）
+    pub imu_rx: f32,           // ホイール回転軸→IMU 前方オフセット [m]
+    pub imu_rz: f32,           // ホイール回転軸→IMU 上方オフセット [m]
 
     // ── 入力フィルタ ──
     pub command_lpf_tau: f32,
@@ -89,7 +88,8 @@ impl Default for PosEkfConfig {
             i_p: 0.000363,
             i_w: 0.000005,
             l: 0.035,
-            robot_radius: 0.08,
+            imu_rx: 0.01,
+            imu_rz: 0.08,
 
             command_lpf_tau: 0.016,
             sign_lpf_tau: 0.4,
@@ -131,6 +131,7 @@ pub struct PosEkfState {
 
     pub command_lp: f32,
     pub tangential_sensor: f32,
+    pub a_centripetal: f32,
     pub tau_eff: f32,
 
     pub q_a: f32,
@@ -161,6 +162,7 @@ pub struct PositionEkf {
     a_raw: f32,
     a_target: f32,
     tangential_sensor: f32,
+    a_centripetal: f32,
     tau_eff: f32,
     q_a_actual: f32,
     k_gain_a: f32,
@@ -190,6 +192,7 @@ impl PositionEkf {
             prev_a_meas: 0.0, prev_a_target: 0.0, command_lp: 0.0,
             r_eff: cfg.r_accel, a_meas: 0.0, a_raw: 0.0, a_target: 0.0,
             tangential_sensor: 0.0,
+            a_centripetal: 0.0,
             tau_eff: 0.0,
             q_a_actual: cfg.q_a_max,
             k_gain_a: 0.0, k_gain_pos: 0.0,
@@ -309,15 +312,25 @@ impl PositionEkf {
         let alpha_cmd = Self::clamp(dt / (self.cfg.command_lpf_tau + dt + 1e-6), 0.0, 1.0);
         self.command_lp += alpha_cmd * (command - self.command_lp);
 
-        // ───── 1. 接線加速度（センサ側のみ、IMU取付位置補正） ─────
-        let tangential_sensor = gyro_angular_accel * self.cfg.robot_radius * 0.8;
-        self.tangential_sensor = tangential_sensor;
+        // ───── 1-2. 観測（完全なIMU物理モデル） ─────
+        // v̇ = (ax cosθ + az sinθ)*9.81              ... 項1: 重力自動キャンセル
+        //    + θ̈*(rx sinθ - rz cosθ)                ... 項3: 接線加速度
+        //    + θ̇²*(rx cosθ + rz sinθ)               ... 項4: 遠心加速度
+        let cos_s = cosf(pitch_sensor);
+        let sin_s = sinf(pitch_sensor);
 
-        // ───── 2. 観測（センサ側の並進加速度） ─────
-        // ボディ→ワールド座標変換（重力は代数的に消える）
-        let a_raw = (cosf(pitch_sensor) * ax_g + sinf(pitch_sensor) * az_g) * 9.81;
-        let a_meas = -(a_raw + tangential_sensor);
-        self.a_raw = a_raw;
+        let a_sensor = (ax_g * cos_s + az_g * sin_s) * 9.81;
+        let a_tangential = gyro_angular_accel
+            * (self.cfg.imu_rx * sin_s - self.cfg.imu_rz * cos_s);
+        let a_centripetal = pitch_rate * pitch_rate
+            * (self.cfg.imu_rx * cos_s + self.cfg.imu_rz * sin_s);
+
+        let v_dot = a_sensor + a_tangential + a_centripetal;
+        let a_meas = -v_dot;  // 既存符号規約維持
+
+        self.a_raw = a_sensor;           // デバッグ: 項1のみ
+        self.tangential_sensor = a_tangential;  // デバッグ: 項3
+        self.a_centripetal = a_centripetal;      // デバッグ: 項4
         self.a_meas = a_meas;
 
         // ───── 3. 予測の目標値（DCモーターモデル + 連立方程式） ─────
@@ -424,6 +437,7 @@ impl PositionEkf {
             a_meas: self.a_meas, a_raw: self.a_raw, a_target: self.a_target,
             command_lp: self.command_lp,
             tangential_sensor: self.tangential_sensor,
+            a_centripetal: self.a_centripetal,
             tau_eff: self.tau_eff,
             q_a: self.q_a_actual,
             k_gain_a: self.k_gain_a, k_gain_pos: self.k_gain_pos,
@@ -438,6 +452,7 @@ impl PositionEkf {
         self.prev_a_meas = 0.0; self.prev_a_target = 0.0; self.command_lp = 0.0;
         self.r_eff = self.cfg.r_accel; self.a_meas = 0.0; self.a_raw = 0.0; self.a_target = 0.0;
         self.tangential_sensor = 0.0;
+        self.a_centripetal = 0.0;
         self.tau_eff = 0.0;
         self.q_a_actual = self.cfg.q_a_max;
         self.k_gain_a = 0.0; self.k_gain_pos = 0.0;
