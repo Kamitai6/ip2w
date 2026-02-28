@@ -1,28 +1,22 @@
 use libm::{sinf, cosf, tanhf};
 
-/// 並進位置推定EKF + レギュレータ（v8: 連立方程式ベースのa_target）
+/// 並進位置推定EKF + レギュレータ（v9: DCモーターモデルによるトルク推定）
 ///
-/// 【v7→v8 変更】
-/// - a_targetの計算を、3つの独立した運動方程式（タイヤ回転・胴体回転・全体並進）を
-///   連立して導出した厳密な式に置き換え。
-///   旧: a_target = (τ - tangential_cmd) * efficiency / (r * mass)
-///   新: a_target = num / den（下記参照）
+/// 【v8→v9 変更】
+/// - τ_effの計算を、datasheetベースのDCモーターモデルに変更。
+///   旧: τ_eff = (command_lp / torque_to_pwm) * motor_efficiency
+///   新: τ_eff = motor_efficiency * k_tau * V_applied - k_b * ω_wheel
+///        V_applied = v_batt * (command_lp / pwm_max)
+///        ω_wheel = v / wheel_radius （EKF推定速度から）
 ///
-///   num = τ_eff * (I_p/r + m_p*l*cos(θ))
-///       - m_p²*g*l²*sin(θ)*cos(θ)
-///       + I_p*m_p*l*ω²*sin(θ)
+///   k_tau: 出力軸トルク定数 [Nm/V]（datasheet: τ_stall / V）
+///   k_b:   逆起電力トルク係数 [Nm·s/rad]（datasheet: τ_stall / ω_noload）
 ///
-///   den = M*I_p - m_p²*l²*cos²(θ)
+///   motor_efficiency < 1 → 駆動トルクを減らす方向（a_target縮小）
 ///
-///   M = I_w/r² + m_w + m_p
-///
-///   τ_eff = (command_lp / torque_to_pwm) * motor_efficiency
-///
-/// - tangential_cmd（旧: ジャイロ微分ベース）は不要に。
-///   角運動の影響は連立方程式で考慮済み。
-/// - tangential_sensor（IMU取付位置補正）はそのまま残す。
-/// - update()にpitch_rate（MEKFバイアス除去済み角速度）を追加。
-/// - configからinertia（旧用途）を削除、i_p, i_w, m_w, l, m_pを追加。
+/// - configからtorque_to_pwmを廃止、k_tau, k_b, v_batt, pwm_maxを追加。
+/// - 連立方程式(compute_translational_accel)は変更なし。
+/// - PosEkfStateにtau_effを追加（デバッグ用）。
 ///
 /// 【絶対遵守仕様（AIへの指示・忘却防止用）】
 /// 1. a_rawの式は v7と同じ。符号変更禁止。
@@ -40,8 +34,11 @@ use libm::{sinf, cosf, tanhf};
 pub struct PosEkfConfig {
     // ── 物理（連立方程式パラメータ） ──
     pub dt: f32,
-    pub torque_to_pwm: f32,   // PWM/Nm
-    pub motor_efficiency: f32, // τに掛ける効率係数
+    pub k_tau: f32,            // 出力軸トルク定数 [Nm/V]（datasheet: τ_stall / V）
+    pub k_b: f32,              // 逆起電力トルク係数 [Nm·s/rad]（datasheet: τ_stall / ω_noload）
+    pub v_batt: f32,           // バッテリ電圧 [V]（初期化時に実測値で上書き）
+    pub pwm_max: f32,          // PWM最大値
+    pub motor_efficiency: f32, // 駆動トルクに掛ける効率係数（<1で推定トルク減少）
     pub wheel_radius: f32,     // r: ホイール半径 [m]
     pub m_p: f32,              // 胴体（振り子）の質量 [kg]
     pub m_w: f32,              // ホイールの質量 [kg]（両輪合計）
@@ -81,8 +78,11 @@ impl Default for PosEkfConfig {
         Self {
             dt: 0.002,
 
-            torque_to_pwm: 10000.0,
-            motor_efficiency: 0.5,
+            k_tau: 0.002452,       // Nm/V (FM90 datasheet: 0.01471Nm / 6V)
+            k_b: 0.001081,         // Nm·s/rad (FM90 datasheet: 0.01471Nm / 13.61rad/s)
+            v_batt: 3.7,           // 初期化時に実測値で上書き
+            pwm_max: 300.0,
+            motor_efficiency: 1.0, // datasheetベースなので初期値1.0
             wheel_radius: 0.03,
             m_p: 0.1,
             m_w: 0.01,
@@ -131,6 +131,7 @@ pub struct PosEkfState {
 
     pub command_lp: f32,
     pub tangential_sensor: f32,
+    pub tau_eff: f32,
 
     pub q_a: f32,
     pub k_gain_a: f32,
@@ -160,6 +161,7 @@ pub struct PositionEkf {
     a_raw: f32,
     a_target: f32,
     tangential_sensor: f32,
+    tau_eff: f32,
     q_a_actual: f32,
     k_gain_a: f32,
     k_gain_pos: f32,
@@ -188,6 +190,7 @@ impl PositionEkf {
             prev_a_meas: 0.0, prev_a_target: 0.0, command_lp: 0.0,
             r_eff: cfg.r_accel, a_meas: 0.0, a_raw: 0.0, a_target: 0.0,
             tangential_sensor: 0.0,
+            tau_eff: 0.0,
             q_a_actual: cfg.q_a_max,
             k_gain_a: 0.0, k_gain_pos: 0.0,
             cfg,
@@ -317,8 +320,12 @@ impl PositionEkf {
         self.a_raw = a_raw;
         self.a_meas = a_meas;
 
-        // ───── 3. 予測の目標値（連立方程式ベース） ─────
-        let tau_eff = (self.command_lp / self.cfg.torque_to_pwm) * self.cfg.motor_efficiency;
+        // ───── 3. 予測の目標値（DCモーターモデル + 連立方程式） ─────
+        let v_applied = self.cfg.v_batt * (self.command_lp / self.cfg.pwm_max);
+        let omega_wheel = self.v / self.cfg.wheel_radius;
+        let tau_eff = self.cfg.motor_efficiency * self.cfg.k_tau * v_applied
+                    - self.cfg.k_b * omega_wheel;
+        self.tau_eff = tau_eff;
         let a_target = self.compute_translational_accel(tau_eff, pitch_cg, pitch_rate);
         self.a_target = a_target;
 
@@ -417,6 +424,7 @@ impl PositionEkf {
             a_meas: self.a_meas, a_raw: self.a_raw, a_target: self.a_target,
             command_lp: self.command_lp,
             tangential_sensor: self.tangential_sensor,
+            tau_eff: self.tau_eff,
             q_a: self.q_a_actual,
             k_gain_a: self.k_gain_a, k_gain_pos: self.k_gain_pos,
         }
@@ -430,6 +438,7 @@ impl PositionEkf {
         self.prev_a_meas = 0.0; self.prev_a_target = 0.0; self.command_lp = 0.0;
         self.r_eff = self.cfg.r_accel; self.a_meas = 0.0; self.a_raw = 0.0; self.a_target = 0.0;
         self.tangential_sensor = 0.0;
+        self.tau_eff = 0.0;
         self.q_a_actual = self.cfg.q_a_max;
         self.k_gain_a = 0.0; self.k_gain_pos = 0.0;
     }

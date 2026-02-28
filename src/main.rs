@@ -525,8 +525,12 @@ fn main() -> ! {
     let mut pos_ekf = pos_ekf::PositionEkf::new(pos_ekf::PosEkfConfig {
         dt: DT,
 
-        torque_to_pwm: TORQUE_TO_PWM,
-        motor_efficiency: 0.5,
+        // torque_to_pwm: TORQUE_TO_PWM,
+        k_tau: 0.002452,       // Nm/V (FM90 datasheet: 0.01471Nm / 6V)
+        k_b: 0.001081,         // Nm·s/rad (FM90 datasheet: 0.01471Nm / 13.61rad/s)
+        v_batt: v,           // 初期化時に実測値で上書き
+        pwm_max: U_MAX,
+        motor_efficiency: 1.0, // datasheetベースなので初期値1.0
         wheel_radius: 0.03,
         m_p: 0.1,
         m_w: 0.023,
@@ -670,16 +674,20 @@ fn main() -> ! {
                             if counter % PRINT_DIV == 0 {
                                 let ps = pos_ekf.state();
                                 udp_println!(
-                                    "{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.4},{:.4},{:.3},{:.3}",
-                                    ps.position, ps.velocity,           // 0,1
-                                    ps.a_target, ps.a_meas, ps.a_raw,   // 2,3,4
-                                    ps.accel,                   // 5,
-                                    ps.innovation, ps.sign_agree_lp,     // 7,8
-                                    ps.r_eff,                   // 9,
-                                    ps.tangential_sensor, // 12
-                                    ps.k_gain_a, ps.k_gain_pos,           // 13,14
-                                    ps.command_lp,                       // 16
-                                    ps.innovation_pos,//17
+                                    "{:.3},{:.3},{:.3},{:.3},{:.3},{:.6},{:.3},{:.3},{:.3},{:.3},{:.4},{:.4},{:.3}",
+                                    ps.position,        // 0
+                                    ps.velocity,        // 1
+                                    ps.a_target,        // 2
+                                    ps.a_meas,          // 3
+                                    ps.accel,           // 4
+                                    ps.tau_eff,         // 5  (Nm, 小さい値なので6桁)
+                                    ps.command_lp,      // 6
+                                    ps.innovation,      // 7
+                                    ps.sign_agree_lp,   // 8
+                                    ps.r_eff,           // 9
+                                    ps.k_gain_a,        // 10
+                                    ps.k_gain_pos,      // 11
+                                    ps.innovation_pos,  // 12
                                 );
                             }
                         } else {
