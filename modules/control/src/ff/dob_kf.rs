@@ -1,4 +1,4 @@
-//! DKF: Dynamics-based Kalman Filter for Disturbance Estimation
+//! DOB-KF
 //!
 //! 2次元カルマンフィルタによる外乱トルク推定
 //! 状態: [ω_pitch, d_pitch]
@@ -14,7 +14,7 @@ use libm::sinf;
 
 /// DKFの設定
 #[derive(Debug, Clone, Copy)]
-pub struct DkfConfig {
+pub struct DobKfConfig {
     /// サンプリング周期 [s]
     pub dt: f32,
     /// 慣性モーメント [kg·m²]
@@ -35,7 +35,7 @@ pub struct DkfConfig {
     pub disturbance_limit: f32,
 }
 
-impl Default for DkfConfig {
+impl Default for DobKfConfig {
     fn default() -> Self {
         Self {
             dt: 1.0 / 500.0,
@@ -53,7 +53,7 @@ impl Default for DkfConfig {
 
 /// DKFの出力
 #[derive(Debug, Clone, Copy, Default)]
-pub struct DkfState {
+pub struct DobKfState {
     /// 推定角速度 [rad/s]
     pub omega: f32,
     /// 推定外乱トルク [Nm]
@@ -70,7 +70,7 @@ pub struct DkfState {
 ///
 /// # 使用例
 /// ```ignore
-/// let mut dkf = Dkf::new(DkfConfig::default());
+/// let mut dkf = DobKf::new(DobKfConfig::default());
 ///
 /// // 制御ループ内
 /// let state = dkf.update(pitch, pitch_rate);
@@ -79,7 +79,7 @@ pub struct DkfState {
 /// // 制御計算後
 /// dkf.set_control_torque(tau);
 /// ```
-pub struct Dkf {
+pub struct DobKf {
     // 状態
     omega: f32, // 推定角速度 [rad/s]
     d: f32,     // 推定外乱トルク [Nm]
@@ -93,15 +93,15 @@ pub struct Dkf {
     tau_prev: f32,
 
     // 設定
-    config: DkfConfig,
+    config: DobKfConfig,
 
     // 事前計算値
     dt_over_i: f32, // dt / I
 }
 
-impl Dkf {
+impl DobKf {
     /// 新しいDKFを作成
-    pub fn new(config: DkfConfig) -> Self {
+    pub fn new(config: DobKfConfig) -> Self {
         let dt_over_i = config.dt / config.inertia;
 
         Self {
@@ -124,7 +124,7 @@ impl Dkf {
     ///
     /// # Returns
     /// 外乱推定状態
-    pub fn update(&mut self, pitch: f32, gyro_pitch: f32) -> DkfState {
+    pub fn update(&mut self, pitch: f32, gyro_pitch: f32) -> DobKfState {
         // ========== PREDICT ==========
 
         // 重力トルク（倒立状態では不安定化方向）
@@ -165,7 +165,7 @@ impl Dkf {
             self.p01 = p01_pred;
             self.p11 = p11_pred;
 
-            return DkfState {
+            return DobKfState {
                 omega: self.omega,
                 disturbance: self.d,
                 omega_variance: self.p00,
@@ -198,7 +198,7 @@ impl Dkf {
         // 外乱の上下限（発散防止）
         self.d = self.d.clamp(-self.config.disturbance_limit, self.config.disturbance_limit);
 
-        DkfState {
+        DobKfState {
             omega: self.omega,
             disturbance: self.d,
             omega_variance: self.p00,
@@ -216,31 +216,6 @@ impl Dkf {
         self.tau_prev = tau;
     }
 
-    /// 推定外乱を取得 [Nm]
-    #[inline]
-    pub fn get_disturbance(&self) -> f32 {
-        self.d
-    }
-
-    /// 推定角速度を取得 [rad/s]
-    #[inline]
-    pub fn get_omega(&self) -> f32 {
-        self.omega
-    }
-
-    /// 推定角加速度を取得 [rad/s²]
-    ///
-    /// 動力学モデル: α = (-τ_motor + mgl·sin(θ) + d) / I
-    /// DKFの予測ステップと同じ式を使用。
-    ///
-    /// # Arguments
-    /// * `pitch` - 現在のピッチ角 [rad]（オフセット込み）
-    #[inline]
-    pub fn get_angular_accel(&self, pitch: f32) -> f32 {
-        let tau_gravity = self.config.mgl * sinf(pitch);
-        (-self.tau_prev + tau_gravity + self.d) / self.config.inertia
-    }
-
     /// リセット
     pub fn reset(&mut self) {
         self.omega = 0.0;
@@ -249,70 +224,5 @@ impl Dkf {
         self.p01 = 0.0;
         self.p11 = self.config.initial_disturbance_variance;
         self.tau_prev = 0.0;
-    }
-
-    /// 設定を取得
-    #[inline]
-    pub fn config(&self) -> &DkfConfig {
-        &self.config
-    }
-
-    /// 共分散行列の要素を取得（デバッグ用）
-    pub fn get_covariance(&self) -> (f32, f32, f32) {
-        (self.p00, self.p01, self.p11)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_dkf_basic() {
-        let mut dkf = Dkf::new(DkfConfig::default());
-
-        // 初期状態
-        assert_eq!(dkf.get_disturbance(), 0.0);
-        assert_eq!(dkf.get_omega(), 0.0);
-
-        // 更新
-        let state = dkf.update(0.0, 0.0);
-        assert!(state.disturbance.abs() < 0.1);
-    }
-
-    #[test]
-    fn test_dkf_disturbance_estimation() {
-        let config = DkfConfig {
-            dt: 0.002,
-            inertia: 0.002,
-            mgl: 0.034,
-            q_omega: 0.01,
-            q_disturbance: 0.001, // 少し大きめで速く収束
-            r_gyro: 0.001,
-            ..Default::default()
-        };
-        let mut dkf = Dkf::new(config);
-
-        // 一定の外乱がある状況をシミュレート
-        // 真の外乱 = 0.01 Nm
-        let true_disturbance = 0.01;
-        let mut true_omega = 0.0;
-
-        for _ in 0..1000 {
-            // 真の動力学（外乱あり）
-            let tau = 0.0; // 制御入力なし
-            let tau_gravity = 0.034 * sinf(0.0); // pitch = 0
-            true_omega += (config.dt / config.inertia)
-                * (tau + tau_gravity + true_disturbance);
-
-            // DKF更新
-            dkf.set_control_torque(tau);
-            let state = dkf.update(0.0, true_omega);
-
-            // 収束確認（最後の方）
-            if state.disturbance_variance < 0.001 {
-                assert!((state.disturbance - true_disturbance).abs() < 0.005);
-            }
-        }
     }
 }

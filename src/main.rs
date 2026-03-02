@@ -43,7 +43,7 @@ use embedded_graphics::{
 };
 use embedded_hal_bus::i2c::{RefCellDevice as I2cRefCellDevice};
 use atom::{atom_motion, ina226, bmi270, bmm150, lp5562};
-use control::{fb::{pid, smc}, ff::{gravity, pos_regulator, dkf, pos_ekf}, util::{mekf, deadzone, mag_calib, mag_ets, mag_rls, lpf}};
+use control::{fb::{pid, smc}, ff::{gravity, dob_kf}, util::{mekf, deadzone, mag_calib, mag_ets, mag_rls, lpf, pos_ekf, ista_smd}};
 use mipidsi_async::{
     Builder, 
     models::{GC9107, ST7789}, 
@@ -473,13 +473,13 @@ fn main() -> ! {
             ..Default::default()
     });
 
-    let mut dkf = dkf::Dkf::new(dkf::DkfConfig {
+    let mut dkf = dob_kf::DobKf::new(dob_kf::DobKfConfig {
         dt: DT,
         inertia: 0.000363, //(1/3)*0.1*(0.1*0.1+0.03*0.03)=0.000363333333333
         mgl: 0.1 * 9.81 * 0.035,  // ≈ 0.034 Nm
         q_omega: 0.1,
         q_disturbance: 1e-6,     // 調整ポイント: 大きくすると追従速く、小さくすると滑らか
-        r_gyro: 0.001,
+        r_gyro: 0.01,
         disturbance_limit: 0.05,    // ±0.05 Nm
         ..Default::default()
     });
@@ -516,12 +516,6 @@ fn main() -> ! {
         .with_v_regulation(U_MAX * 0.8);
 
     let mut gravity = gravity::GravityCompensator::new(0.1, 0.035);
-    // let mut pos_regulator = pos_regulator::PositionRegulator::new(DT, 1000.0, 0.05) // sec sec rad
-    //     .with_max(100.0, 10.0)
-    //     // .with_lowpass(5.0)
-    //     // .with_washout(5.0)
-    //     .with_decay(10.0, 1000.0)
-    //     ;
     let mut pos_ekf = pos_ekf::PositionEkf::new(pos_ekf::PosEkfConfig {
         dt: DT,
 
@@ -563,6 +557,8 @@ fn main() -> ! {
 
         ..Default::default()
     });
+    let mut smd = ista_smd::ImplicitSmd::new(18.4, 165.0, DT);
+    smd.init_state(0.0);
 
     let mut yaw_pid = pid::PID::new(DT, 10.0, 0.0, 20.0);
 
@@ -618,6 +614,7 @@ fn main() -> ! {
                         if counter % MAG_DIV == 0 {
                             // ekf.update_mag_yaw(mx, my, mz);
                         }
+                        
                         if counter % PRINT_DIV == 0 {
                             // info!("a={}, {}, {}", ax, ay, az);
                             // info!("g={}, {}, {}", gx, gy, gz);
@@ -665,41 +662,41 @@ fn main() -> ! {
                             let tau_control = -base_out * (U_MAX / atom_max) * PWM_TO_TORQUE;
                             dkf.set_control_torque(tau_control);
 
-                            // target_angle = 0.0 - pos_regulator.update(total_output);
-                            // let angular_accel = dkf.get_angular_accel(now_angle);
                             let alpha_gyro = DT / (0.02 + DT); // 50Hz LPF
                                 gyro_lpf += alpha_gyro * (state.pitch_rate - gyro_lpf);
                             let gyro_angular_accel = (gyro_lpf - prev_gyro_lpf) / DT;
                                 prev_gyro_lpf = gyro_lpf;
+                            let angular_accel = smd.update(state.pitch_rate);
                             target_angle = 0.0 - pos_ekf.update(total_output.clamp(-U_MAX, U_MAX), ax, az, state.pitch, now_angle, state.pitch_rate, gyro_angular_accel);
 
                             if counter % PRINT_DIV == 0 {
                                 let ps = pos_ekf.state();
                                 udp_println!(
-                                    "{:.3},{:.3},{:.3},{:.3},{:.3},{:.6},{:.3},{:.3},{:.3},{:.3},{:.4},{:.4},{:.3},{:.3},{:.3}",
-                                    ps.position,          // 0
-                                    ps.velocity,          // 1
-                                    ps.a_target,          // 2
-                                    ps.a_meas,            // 3
-                                    ps.accel,             // 4
-                                    ps.tau_eff,           // 5
-                                    ps.command_lp,        // 6
-                                    ps.innovation,        // 7
-                                    ps.sign_agree_lp,     // 8
-                                    ps.r_eff,             // 9
-                                    ps.k_gain_a,          // 10
-                                    ps.k_gain_pos,        // 11
-                                    ps.innovation_pos,    // 12
-                                    ps.tangential_sensor, // 13 (項3: 接線)
-                                    ps.a_centripetal,     // 14 (項4: 遠心)
-                                );
+    "{:.3},{:.3},{:.3},{:.3},{:.3},{:.6},{:.3},{:.3},{:.3},{:.3},{:.4},{:.4},{:.3},{:.3},{:.3},{:.3},{:.3}",
+    ps.position,          // 0
+    ps.velocity,          // 1
+    ps.a_target,          // 2
+    ps.a_meas,            // 3
+    ps.accel,             // 4
+    ps.tau_eff,           // 5
+    ps.command_lp,        // 6
+    ps.innovation,        // 7
+    ps.sign_agree_lp,     // 8
+    ps.r_eff,             // 9
+    ps.k_gain_a,          // 10
+    ps.k_gain_pos,        // 11
+    ps.innovation_pos,    // 12
+    ps.tangential_sensor, // 13
+    ps.a_centripetal,     // 14
+    gyro_angular_accel,   // 15 [rad/s^2]
+    angular_accel,
+);
                             }
                         } else {
                             m1_pwm = 0;
                             m2_pwm = 0;
                             smc.reset();
                             yaw_pid.reset();
-                            // pos_regulator.reset();
                             pos_ekf.reset();
                             ekf.reset_yaw();
                             dkf.reset();
