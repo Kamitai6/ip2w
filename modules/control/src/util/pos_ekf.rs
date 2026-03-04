@@ -305,7 +305,7 @@ impl PositionEkf {
     /// * `pitch_cg` - ピッチ角（重心基準）[rad]
     /// * `pitch_rate` - MEKFバイアス除去済みピッチ角速度 [rad/s]
     /// * `gyro_angular_accel` - ジャイロLPF微分による角加速度 [rad/s²]（tangential_sensor用）
-    pub fn update(&mut self, command: f32, ax_g: f32, az_g: f32, pitch_sensor: f32, pitch_cg: f32, pitch_rate: f32, gyro_angular_accel: f32) -> f32 {
+    pub fn update(&mut self, command: f32, ax_g: f32, az_g: f32, pitch_sensor: f32, pitch_cg: f32, pitch_rate: f32, angular_accel: f32) -> f32 {
         let dt = self.cfg.dt;
 
         // ───── 0. コマンドLPF ─────
@@ -320,7 +320,7 @@ impl PositionEkf {
         let sin_s = sinf(pitch_sensor);
 
         let a_sensor = (ax_g * cos_s + az_g * sin_s) * 9.81;
-        let a_tangential = gyro_angular_accel
+        let a_tangential = angular_accel
             * (self.cfg.imu_rx * sin_s - self.cfg.imu_rz * cos_s);
         let a_centripetal = pitch_rate * pitch_rate
             * (self.cfg.imu_rx * cos_s + self.cfg.imu_rz * sin_s);

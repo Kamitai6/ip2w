@@ -538,7 +538,7 @@ fn main() -> ! {
         a_max: 50.0,
         v_max: 5.0,
 
-        command_lpf_tau: 0.016,
+        command_lpf_tau: 0.003183,
         sign_lpf_tau: 0.1,
 
         r_accel: 1000.0,
@@ -615,23 +615,6 @@ fn main() -> ! {
                         if counter % MAG_DIV == 0 {
                             // ekf.update_mag_yaw(mx, my, mz);
                         }
-                        
-                        let cos_s = cosf(state.pitch);
-                        let sin_s = sinf(state.pitch);
-
-                        let alpha_gyro = DT / (0.02 + DT);
-                            gyro_lpf += alpha_gyro * (state.pitch_rate - gyro_lpf);
-                        let gyro_angular_accel = (gyro_lpf - prev_gyro_lpf) / DT;
-                            prev_gyro_lpf = gyro_lpf;
-                        let alpha_smd = DT / (0.00318 + DT); // 50Hz
-                            smd_lpf += alpha_smd * (state.pitch_rate - smd_lpf);
-                        let smd_angular_accel = smd.update(smd_lpf);
-
-                        let a_sensor = (ax * cos_s + az * sin_s) * 9.81;
-                        let a_tangential_gyro = gyro_angular_accel
-                            * (0.01 * sin_s - 0.08 * cos_s);
-                        let a_tangential_smd = smd_angular_accel
-                            * (0.01 * sin_s - 0.08 * cos_s);
 
                         if counter % PRINT_DIV == 0 {
                             // info!("a={}, {}, {}", ax, ay, az);
@@ -641,7 +624,7 @@ fn main() -> ! {
                             // info!("ax={}, g={}, accel={}", ax, libm::sinf(state.pitch), (ax + libm::sinf(state.pitch)) * 9.81);
                             // defmt::info!("{}, {}, {}", az, libm::cosf(state.pitch), (az - libm::cosf(state.pitch)) * 9.81);
                             // defmt::info!("{}, {}", (ax * libm::cosf(state.pitch)) - (az * libm::sinf(state.pitch)), (ax * libm::cosf(state.pitch)) + (az * libm::sinf(state.pitch)));
-                            info!("raw:{}, gyro:{}, smd:{}", a_sensor, a_tangential_gyro, a_tangential_smd);
+                            // info!("raw:{}, gyro:{}, smd:{}", a_sensor, a_tangential_gyro, a_tangential_smd);
                         }
                         counter += 1;
 
@@ -681,15 +664,10 @@ fn main() -> ! {
                             let tau_control = -base_out * (U_MAX / atom_max) * PWM_TO_TORQUE;
                             dkf.set_control_torque(tau_control);
 
-                            let alpha_gyro = DT / (0.02 + DT);
-                                gyro_lpf += alpha_gyro * (state.pitch_rate - gyro_lpf);
-                            let gyro_angular_accel = (gyro_lpf - prev_gyro_lpf) / DT;
-                                prev_gyro_lpf = gyro_lpf;
-                            let alpha_smd = DT / (0.0053 + DT);
-                                smd_lpf += alpha_smd * (state.pitch_rate - smd_lpf);
+                            let alpha_smd = DT / (0.00318 + DT); // 50Hz == 加速度センサ
+                            smd_lpf += alpha_smd * (state.pitch_rate - smd_lpf);
                             let smd_angular_accel = smd.update(smd_lpf);
-                            let dkf_angular_accel = dkf.get_angular_accel(now_angle);
-                            target_angle = 0.0 - pos_ekf.update(total_output.clamp(-U_MAX, U_MAX), ax, az, state.pitch, now_angle, state.pitch_rate, gyro_angular_accel);
+                            target_angle = 0.0 - pos_ekf.update(total_output.clamp(-U_MAX, U_MAX), ax, az, state.pitch, now_angle, state.pitch_rate, smd_angular_accel);
 
                             if counter % PRINT_DIV == 0 {
                                 let ps = pos_ekf.state();
@@ -700,17 +678,13 @@ fn main() -> ! {
                                     ps.a_target,          // 2
                                     ps.a_meas,            // 3
                                     ps.accel,             // 4
-                                    // ps.innovation,        // 7
-                                    // ps.innovation_pos,    // 12
-                                    // ps.k_gain_a,          // 10
-                                    // ps.k_gain_pos,        // 11
+                                    ps.innovation,        // 7
+                                    ps.innovation_pos,    // 12
+                                    ps.k_gain_a,          // 10
+                                    ps.k_gain_pos,        // 11
                                     ps.a_raw,
                                     ps.tangential_sensor, // 13
                                     ps.a_centripetal,     // 14
-                                    gyro_angular_accel,
-                                    smd_angular_accel,
-                                    dkf_angular_accel,
-                                    state.pitch_rate,
                                 );
                             }
                         } else {
