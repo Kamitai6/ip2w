@@ -216,6 +216,19 @@ impl DobKf {
         self.tau_prev = tau;
     }
 
+    /// 推定角加速度を取得 [rad/s²]
+    ///
+    /// 動力学モデル: α = (-τ_motor + mgl·sin(θ) + d) / I
+    /// DKFの予測ステップと同じ式を使用。
+    ///
+    /// # Arguments
+    /// * `pitch` - 現在のピッチ角 [rad]（オフセット込み）
+    #[inline]
+    pub fn get_angular_accel(&self, pitch: f32) -> f32 {
+        let tau_gravity = self.config.mgl * sinf(pitch);
+        (-self.tau_prev + tau_gravity + self.d) / self.config.inertia
+    }
+
     /// リセット
     pub fn reset(&mut self) {
         self.omega = 0.0;

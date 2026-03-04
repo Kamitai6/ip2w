@@ -11,7 +11,7 @@ use core::{cell::{RefCell, Cell}, f32::consts::PI, fmt::Write};
 use alloc::{borrow::ToOwned, string::ToString};
 use critical_section::{Mutex, with};
 use defmt::info;
-use libm::{atan2f, sqrtf};
+use libm::{atan2f, sqrtf, cosf, sinf};
 use heapless::String;
 use {esp_backtrace as _, esp_println as _};
 
@@ -479,7 +479,7 @@ fn main() -> ! {
         mgl: 0.1 * 9.81 * 0.035,  // ≈ 0.034 Nm
         q_omega: 0.1,
         q_disturbance: 1e-6,     // 調整ポイント: 大きくすると追従速く、小さくすると滑らか
-        r_gyro: 0.01,
+        r_gyro: 0.001,
         disturbance_limit: 0.05,    // ±0.05 Nm
         ..Default::default()
     });
@@ -557,10 +557,10 @@ fn main() -> ! {
 
         ..Default::default()
     });
-    let mut smd = ista_smd::ImplicitSmd::new(18.4, 165.0, DT);
+    let mut smd = ista_smd::ImplicitSmd::new(33.54, 550.0, DT); //L=500 1.5√L ​と 1.1L
     smd.init_state(0.0);
 
-    let mut yaw_pid = pid::PID::new(DT, 10.0, 0.0, 20.0);
+    let mut yaw_pid = pid::PID::new(DT, 0.0, 0.0, 20.0);
 
     let timer0 = timg0.timer0;
     timer0.set_interrupt_handler(tg0_t0_handler);
@@ -581,6 +581,7 @@ fn main() -> ! {
     let mut counter = 0;
 
     let mut gyro_lpf = 0.0;
+    let mut smd_lpf = 0.0;
     let mut prev_gyro_lpf = 0.0;
 
     info!("Start!");
@@ -615,6 +616,23 @@ fn main() -> ! {
                             // ekf.update_mag_yaw(mx, my, mz);
                         }
                         
+                        let cos_s = cosf(state.pitch);
+                        let sin_s = sinf(state.pitch);
+
+                        let alpha_gyro = DT / (0.02 + DT);
+                            gyro_lpf += alpha_gyro * (state.pitch_rate - gyro_lpf);
+                        let gyro_angular_accel = (gyro_lpf - prev_gyro_lpf) / DT;
+                            prev_gyro_lpf = gyro_lpf;
+                        let alpha_smd = DT / (0.00318 + DT); // 50Hz
+                            smd_lpf += alpha_smd * (state.pitch_rate - smd_lpf);
+                        let smd_angular_accel = smd.update(smd_lpf);
+
+                        let a_sensor = (ax * cos_s + az * sin_s) * 9.81;
+                        let a_tangential_gyro = gyro_angular_accel
+                            * (0.01 * sin_s - 0.08 * cos_s);
+                        let a_tangential_smd = smd_angular_accel
+                            * (0.01 * sin_s - 0.08 * cos_s);
+
                         if counter % PRINT_DIV == 0 {
                             // info!("a={}, {}, {}", ax, ay, az);
                             // info!("g={}, {}, {}", gx, gy, gz);
@@ -623,6 +641,7 @@ fn main() -> ! {
                             // info!("ax={}, g={}, accel={}", ax, libm::sinf(state.pitch), (ax + libm::sinf(state.pitch)) * 9.81);
                             // defmt::info!("{}, {}, {}", az, libm::cosf(state.pitch), (az - libm::cosf(state.pitch)) * 9.81);
                             // defmt::info!("{}, {}", (ax * libm::cosf(state.pitch)) - (az * libm::sinf(state.pitch)), (ax * libm::cosf(state.pitch)) + (az * libm::sinf(state.pitch)));
+                            info!("raw:{}, gyro:{}, smd:{}", a_sensor, a_tangential_gyro, a_tangential_smd);
                         }
                         counter += 1;
 
@@ -662,35 +681,37 @@ fn main() -> ! {
                             let tau_control = -base_out * (U_MAX / atom_max) * PWM_TO_TORQUE;
                             dkf.set_control_torque(tau_control);
 
-                            let alpha_gyro = DT / (0.02 + DT); // 50Hz LPF
+                            let alpha_gyro = DT / (0.02 + DT);
                                 gyro_lpf += alpha_gyro * (state.pitch_rate - gyro_lpf);
                             let gyro_angular_accel = (gyro_lpf - prev_gyro_lpf) / DT;
                                 prev_gyro_lpf = gyro_lpf;
-                            let angular_accel = smd.update(state.pitch_rate);
+                            let alpha_smd = DT / (0.0053 + DT);
+                                smd_lpf += alpha_smd * (state.pitch_rate - smd_lpf);
+                            let smd_angular_accel = smd.update(smd_lpf);
+                            let dkf_angular_accel = dkf.get_angular_accel(now_angle);
                             target_angle = 0.0 - pos_ekf.update(total_output.clamp(-U_MAX, U_MAX), ax, az, state.pitch, now_angle, state.pitch_rate, gyro_angular_accel);
 
                             if counter % PRINT_DIV == 0 {
                                 let ps = pos_ekf.state();
                                 udp_println!(
-    "{:.3},{:.3},{:.3},{:.3},{:.3},{:.6},{:.3},{:.3},{:.3},{:.3},{:.4},{:.4},{:.3},{:.3},{:.3},{:.3},{:.3}",
-    ps.position,          // 0
-    ps.velocity,          // 1
-    ps.a_target,          // 2
-    ps.a_meas,            // 3
-    ps.accel,             // 4
-    ps.tau_eff,           // 5
-    ps.command_lp,        // 6
-    ps.innovation,        // 7
-    ps.sign_agree_lp,     // 8
-    ps.r_eff,             // 9
-    ps.k_gain_a,          // 10
-    ps.k_gain_pos,        // 11
-    ps.innovation_pos,    // 12
-    ps.tangential_sensor, // 13
-    ps.a_centripetal,     // 14
-    gyro_angular_accel,   // 15 [rad/s^2]
-    angular_accel,
-);
+                                    "{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3}",
+                                    ps.position,          // 0
+                                    ps.velocity,          // 1
+                                    ps.a_target,          // 2
+                                    ps.a_meas,            // 3
+                                    ps.accel,             // 4
+                                    // ps.innovation,        // 7
+                                    // ps.innovation_pos,    // 12
+                                    // ps.k_gain_a,          // 10
+                                    // ps.k_gain_pos,        // 11
+                                    ps.a_raw,
+                                    ps.tangential_sensor, // 13
+                                    ps.a_centripetal,     // 14
+                                    gyro_angular_accel,
+                                    smd_angular_accel,
+                                    dkf_angular_accel,
+                                    state.pitch_rate,
+                                );
                             }
                         } else {
                             m1_pwm = 0;
@@ -701,8 +722,8 @@ fn main() -> ! {
                             ekf.reset_yaw();
                             dkf.reset();
                         }
-                        let _ = motion.set_motor(atom_motion::MotorChannel::M1, m1_pwm);
-                        let _ = motion.set_motor(atom_motion::MotorChannel::M2, m2_pwm);
+                        motion.set_motor(atom_motion::MotorChannel::M1, m1_pwm).unwrap();
+                        motion.set_motor(atom_motion::MotorChannel::M2, m2_pwm).unwrap();
 
                         let counter = critical_section::with(|cs| {
                             TIMER_COUNTER.borrow(cs).get()
