@@ -6,6 +6,7 @@ use libm::{sinf, cosf};
 /// - レギュレータを外部PIDに分離。update()はPosEkfStateを返すのみ。
 /// - state()メソッドを廃止、update()が直接PosEkfStateを返す。
 /// - tanhf依存を削除。
+/// - 予測ステップの積分に一次ホールド（FOH）の厳密解を適用
 ///
 /// 【v9d からの継続仕様】
 /// - 状態 [v, x, a, b]（4状態）、bはa_measセンサバイアス
@@ -267,32 +268,45 @@ impl PositionEkf {
             + self.cfg.constraint_r_scale * (jerk_ratio * jerk_ratio + a_ratio * a_ratio + v_ratio * v_ratio);
         self.r_eff = self.cfg.r_accel * r_scale;
 
-        // ───── 4. 状態予測（a = a_target直接、jerk/accel/vel制限あり） ─────
+        // ───── 4. 状態予測（一次ホールド積分、jerk/accel/vel制限あり） ─────
         let mut da = a_target - self.a;
         let da_max = self.cfg.j_max * dt;
         let jerk_limited = da.abs() > da_max;
         da = Self::clamp(da, -da_max, da_max);
 
+        // a_k (前回の加速度) と a_k+1 (今回の加速度) を保持して積分に使う
+        let a_prev = self.a;
+        
         self.a += da;
         self.a = Self::clamp(self.a, -self.cfg.a_max, self.cfg.a_max);
-        self.v += self.a * dt;
+        
+        let a_next = self.a;
+
+        // 位置の更新 (一次ホールド: a_prev と a_next の両方を考慮)
+        self.x += self.v * dt + (a_prev / 3.0 + a_next / 6.0) * dt * dt;
+
+        // 速度の更新 (一次ホールド: 台形積分)
+        self.v += (a_prev + a_next) / 2.0 * dt;
         self.v = Self::clamp(self.v, -self.cfg.v_max, self.cfg.v_max);
-        self.x += self.v * dt;
+        
         // b: ランダムウォーク、予測では変化しない
 
-        // ───── 5. 共分散予測 ─────
-        // F = [[1,  0,  φ·dt,  0],
-        //      [dt, 1,  φ·dt², 0],
-        //      [0,  0,  φ,     0],
-        //      [0,  0,  0,     1]]
+        // ───── 5. 共分散予測（一次ホールドのヤコビアン行列） ─────
+        // 一次ホールドの数式に合わせた状態遷移の偏微分 (∂f / ∂x)
+        // phi は ∂a_{k+1} / ∂a_k (制限にかかっていれば1、到達していれば0)
         let phi = if jerk_limited { 1.0 } else { 0.0 };
 
         let mut f = [[0.0f32; 4]; 4];
         f[0][0] = 1.0;
-        f[0][2] = phi * dt;
+        // ∂v_{k+1} / ∂a_k = 0.5 * (1 + ∂a_{k+1}/∂a_k) * dt
+        f[0][2] = 0.5 * (1.0 + phi) * dt;
+        
+        // ∂x_{k+1} / ∂v_k = dt
         f[1][0] = dt;
         f[1][1] = 1.0;
-        f[1][2] = phi * dt * dt;
+        // ∂x_{k+1} / ∂a_k = (1/3 + 1/6 * ∂a_{k+1}/∂a_k) * dt^2
+        f[1][2] = (1.0 / 3.0 + (1.0 / 6.0) * phi) * dt * dt;
+        
         f[2][2] = phi;
         f[3][3] = 1.0;
 

@@ -546,7 +546,7 @@ fn main() -> ! {
         q_a: 10.0,
         q_v: 1e-3,
         q_x: 1e-4,
-        q_bias: 1e-3,
+        q_bias: 1e-4,
 
         ..Default::default()
     });
