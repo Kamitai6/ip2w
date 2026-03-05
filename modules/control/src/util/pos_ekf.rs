@@ -1,34 +1,29 @@
-use libm::{sinf, cosf, tanhf};
+use libm::{sinf, cosf};
 
-/// 並進位置推定EKF + レギュレータ（v9b: DCモーターモデル + 完全IMU物理モデル）
+/// 並進位置推定EKF（v9e: 推定専用、レギュレータ分離）
 ///
-/// 【v9→v9b 変更】
-/// - a_meas（観測側）の計算を完全な物理モデルに変更。
-///   旧: a_raw = (cosθ*ax + sinθ*az)*9.81, a_meas = -(a_raw + tangential_sensor)
-///   新: v̇ = (ax cosθ + az sinθ)*9.81                        ... 項1: 重力自動キャンセル
-///          + θ̈*(rx sinθ - rz cosθ)                           ... 項3: 接線加速度
-///          + θ̇²*(rx cosθ + rz sinθ)                          ... 項4: 遠心加速度
-///        a_meas = -v̇  （既存符号規約維持）
+/// 【v9d→v9e 変更】
+/// - レギュレータを外部PIDに分離。update()はPosEkfStateを返すのみ。
+/// - state()メソッドを廃止、update()が直接PosEkfStateを返す。
+/// - tanhf依存を削除。
 ///
-///   rx: ホイール回転軸→IMU の前方オフセット [m]
-///   rz: ホイール回転軸→IMU の上方オフセット [m]
-///   （ロボット完全直立・IMU座標=世界座標時の定義）
-///
-/// - configからrobot_radiusを廃止、imu_rx, imu_rzを追加。
-/// - PosEkfStateにa_centripetal追加（デバッグ用）。
+/// 【v9d からの継続仕様】
+/// - 状態 [v, x, a, b]（4状態）、bはa_measセンサバイアス
+/// - 観測: innovation = a_meas - (a + b), H = [0, 0, 1, 1]
+/// - jerk/accel/velベースのadaptive Rは維持
 ///
 /// 【絶対遵守仕様（AIへの指示・忘却防止用）】
 /// 1. a_measの全体符号反転（a_meas = -v̇）は既存規約。変更禁止。
 /// 2. v̇の式は実験で検証済み（+版が静止時0になることを確認）。
 ///
-/// 状態: [v, x, a]（3状態）
+/// 状態: [v, x, a, b]（4状態）
 ///   v: 並進速度 [m/s]
 ///   x: 並進位置 [m]
 ///   a: 並進加速度 [m/s²]
+///   b: a_measセンサバイアス [m/s²]
 ///
 /// 観測:
-///   1. z=a_meas, H=[0,0,1], R=r_eff（加速度センサ、短期補正）
-///   2. z=0,      H=[0,1,0], R=r_pos（位置参照、長期ドリフト抑制）
+///   z=a_meas, H=[0,0,1,1], R=r_eff（加速度センサ、バイアス補正付き）
 pub struct PosEkfConfig {
     // ── 物理（連立方程式パラメータ） ──
     pub dt: f32,
@@ -48,7 +43,6 @@ pub struct PosEkfConfig {
 
     // ── 入力フィルタ ──
     pub command_lpf_tau: f32,
-    pub sign_lpf_tau: f32,
 
     // ── ハードウェア制約 ──
     pub j_max: f32,
@@ -58,18 +52,12 @@ pub struct PosEkfConfig {
     // ── 観測ノイズ ──
     pub r_accel: f32,
     pub constraint_r_scale: f32,
-    pub r_pos: f32,
 
     // ── プロセスノイズ ──
-    pub q_a_min: f32,
-    pub q_a_max: f32,
+    pub q_a: f32,
     pub q_v: f32,
     pub q_x: f32,
-
-    // ── レギュレータ ──
-    pub k_pos: f32,
-    pub k_vel: f32,
-    pub max_output: f32,
+    pub q_bias: f32,
 }
 
 impl Default for PosEkfConfig {
@@ -77,11 +65,11 @@ impl Default for PosEkfConfig {
         Self {
             dt: 0.002,
 
-            k_tau: 0.002452,       // Nm/V (FM90 datasheet: 0.01471Nm / 6V)
-            k_b: 0.001081,         // Nm·s/rad (FM90 datasheet: 0.01471Nm / 13.61rad/s)
-            v_batt: 3.7,           // 初期化時に実測値で上書き
+            k_tau: 0.002452,
+            k_b: 0.001081,
+            v_batt: 3.7,
             pwm_max: 300.0,
-            motor_efficiency: 1.0, // datasheetベースなので初期値1.0
+            motor_efficiency: 1.0,
             wheel_radius: 0.03,
             m_p: 0.1,
             m_w: 0.01,
@@ -91,25 +79,19 @@ impl Default for PosEkfConfig {
             imu_rx: 0.01,
             imu_rz: 0.08,
 
-            command_lpf_tau: 0.016,
-            sign_lpf_tau: 0.4,
+            command_lpf_tau: 0.003183,
 
             j_max: 400.0,
             a_max: 50.0,
             v_max: 5.0,
 
-            r_accel: 0.1,
+            r_accel: 0.01,
             constraint_r_scale: 2.0,
-            r_pos: 1.0,
 
-            q_a_min: 1.0,
-            q_a_max: 10.0,
-            q_v: 1e-5,
-            q_x: 1e-6,
-
-            k_pos: 0.1,
-            k_vel: 0.1,
-            max_output: 0.35,
+            q_a: 10.0,
+            q_v: 1e-3,
+            q_x: 1e-4,
+            q_bias: 1e-4,
         }
     }
 }
@@ -119,10 +101,9 @@ pub struct PosEkfState {
     pub velocity: f32,
     pub position: f32,
     pub accel: f32,
+    pub bias: f32,
 
     pub innovation: f32,
-    pub innovation_pos: f32,
-    pub sign_agree_lp: f32,
     pub r_eff: f32,
 
     pub a_meas: f32,
@@ -134,24 +115,22 @@ pub struct PosEkfState {
     pub a_centripetal: f32,
     pub tau_eff: f32,
 
-    pub q_a: f32,
     pub k_gain_a: f32,
-    pub k_gain_pos: f32,
+    pub k_gain_bias: f32,
 }
 
 pub struct PositionEkf {
     v: f32,
     x: f32,
     a: f32,
+    b: f32,
 
-    p: [[f32; 3]; 3],
+    p: [[f32; 4]; 4],
 
     // プリコンピュート定数
     m_total: f32,  // M = I_w/r² + m_w + m_p
 
-    sign_agree_lp: f32,
     innovation: f32,
-    innovation_pos: f32,
 
     prev_a_meas: f32,
     prev_a_target: f32,
@@ -164,9 +143,8 @@ pub struct PositionEkf {
     tangential_sensor: f32,
     a_centripetal: f32,
     tau_eff: f32,
-    q_a_actual: f32,
     k_gain_a: f32,
-    k_gain_pos: f32,
+    k_gain_bias: f32,
 
     cfg: PosEkfConfig,
 }
@@ -175,27 +153,26 @@ impl PositionEkf {
     const G: f32 = 9.81;
 
     pub fn new(cfg: PosEkfConfig) -> Self {
-        let mut p = [[0.0f32; 3]; 3];
+        let mut p = [[0.0f32; 4]; 4];
         p[0][0] = 0.01;
         p[1][1] = 0.01;
         p[2][2] = 0.5;
+        p[3][3] = 0.001;
 
         let r = cfg.wheel_radius;
         let m_total = cfg.i_w / (r * r) + cfg.m_w + cfg.m_p;
 
         Self {
-            v: 0.0, x: 0.0, a: 0.0,
+            v: 0.0, x: 0.0, a: 0.0, b: 0.0,
             p,
             m_total,
-            sign_agree_lp: 0.5,
-            innovation: 0.0, innovation_pos: 0.0,
+            innovation: 0.0,
             prev_a_meas: 0.0, prev_a_target: 0.0, command_lp: 0.0,
             r_eff: cfg.r_accel, a_meas: 0.0, a_raw: 0.0, a_target: 0.0,
             tangential_sensor: 0.0,
             a_centripetal: 0.0,
             tau_eff: 0.0,
-            q_a_actual: cfg.q_a_max,
-            k_gain_a: 0.0, k_gain_pos: 0.0,
+            k_gain_a: 0.0, k_gain_bias: 0.0,
             cfg,
         }
     }
@@ -205,14 +182,9 @@ impl PositionEkf {
         if x < lo { lo } else if x > hi { hi } else { x }
     }
 
-    #[inline(always)]
-    fn lerp(a: f32, b: f32, t: f32) -> f32 {
-        a + (b - a) * t
-    }
-
-    fn symmetrize(p: &mut [[f32; 3]; 3]) {
-        for i in 0..3 {
-            for j in (i + 1)..3 {
+    fn symmetrize(p: &mut [[f32; 4]; 4]) {
+        for i in 0..4 {
+            for j in (i + 1)..4 {
                 let v = 0.5 * (p[i][j] + p[j][i]);
                 p[i][j] = v; p[j][i] = v;
             }
@@ -220,60 +192,7 @@ impl PositionEkf {
         }
     }
 
-    /// スカラー観測のJoseph形式更新
-    /// h_idx: H行列で1になる列インデックス
-    fn scalar_observation_update(&mut self, h_idx: usize, innovation: f32, r: f32) -> [f32; 3] {
-        let s = self.p[h_idx][h_idx] + r;
-        let s_inv = 1.0 / (s + 1e-9);
-
-        let mut k = [0.0f32; 3];
-        for i in 0..3 {
-            k[i] = self.p[i][h_idx] * s_inv;
-        }
-
-        self.v += k[0] * innovation;
-        self.x += k[1] * innovation;
-        self.a += k[2] * innovation;
-
-        // Joseph形式: P = (I - K*H) * P * (I - K*H)^T + K*R*K^T
-        let mut a_mat = [[0.0f32; 3]; 3];
-        for i in 0..3 {
-            a_mat[i][i] = 1.0;
-            a_mat[i][h_idx] -= k[i];
-        }
-
-        let p_before = self.p;
-        let mut ap = [[0.0f32; 3]; 3];
-        for i in 0..3 {
-            for j in 0..3 {
-                let mut ss = 0.0;
-                for kk in 0..3 { ss += a_mat[i][kk] * p_before[kk][j]; }
-                ap[i][j] = ss;
-            }
-        }
-        let mut p_new = [[0.0f32; 3]; 3];
-        for i in 0..3 {
-            for j in 0..3 {
-                let mut ss = 0.0;
-                for kk in 0..3 { ss += ap[i][kk] * a_mat[j][kk]; }
-                p_new[i][j] = ss;
-            }
-        }
-        for i in 0..3 {
-            for j in 0..3 { p_new[i][j] += k[i] * r * k[j]; }
-        }
-
-        Self::symmetrize(&mut p_new);
-        self.p = p_new;
-
-        k
-    }
-
     /// 連立方程式から並進加速度を計算
-    ///
-    /// τ_eff: 有効トルク [Nm]
-    /// theta: ピッチ角 [rad]
-    /// omega: ピッチ角速度 [rad/s]
     fn compute_translational_accel(&self, tau_eff: f32, theta: f32, omega: f32) -> f32 {
         let r = self.cfg.wheel_radius;
         let m_p = self.cfg.m_p;
@@ -289,7 +208,6 @@ impl PositionEkf {
 
         let den = self.m_total * i_p - m_p * m_p * l * l * cos_t * cos_t;
 
-        // denがゼロに近い場合の保護
         if den.abs() < 1e-9 {
             return 0.0;
         }
@@ -304,18 +222,15 @@ impl PositionEkf {
     /// * `pitch_sensor` - ピッチ角（センサ位置基準）[rad]
     /// * `pitch_cg` - ピッチ角（重心基準）[rad]
     /// * `pitch_rate` - MEKFバイアス除去済みピッチ角速度 [rad/s]
-    /// * `gyro_angular_accel` - ジャイロLPF微分による角加速度 [rad/s²]（tangential_sensor用）
-    pub fn update(&mut self, command: f32, ax_g: f32, az_g: f32, pitch_sensor: f32, pitch_cg: f32, pitch_rate: f32, angular_accel: f32) -> f32 {
+    /// * `angular_accel` - ジャイロLPF微分による角加速度 [rad/s²]
+    pub fn update(&mut self, command: f32, ax_g: f32, az_g: f32, pitch_sensor: f32, pitch_cg: f32, pitch_rate: f32, angular_accel: f32) -> PosEkfState {
         let dt = self.cfg.dt;
 
         // ───── 0. コマンドLPF ─────
         let alpha_cmd = Self::clamp(dt / (self.cfg.command_lpf_tau + dt + 1e-6), 0.0, 1.0);
         self.command_lp += alpha_cmd * (command - self.command_lp);
 
-        // ───── 1-2. 観測（完全なIMU物理モデル） ─────
-        // v̇ = (ax cosθ + az sinθ)*9.81              ... 項1: 重力自動キャンセル
-        //    + θ̈*(rx sinθ - rz cosθ)                ... 項3: 接線加速度
-        //    + θ̇²*(rx cosθ + rz sinθ)               ... 項4: 遠心加速度
+        // ───── 1. 観測（完全なIMU物理モデル） ─────
         let cos_s = cosf(pitch_sensor);
         let sin_s = sinf(pitch_sensor);
 
@@ -328,12 +243,12 @@ impl PositionEkf {
         let v_dot = a_sensor + a_tangential + a_centripetal;
         let a_meas = -v_dot;  // 既存符号規約維持
 
-        self.a_raw = a_sensor;           // デバッグ: 項1のみ
-        self.tangential_sensor = a_tangential;  // デバッグ: 項3
-        self.a_centripetal = a_centripetal;      // デバッグ: 項4
+        self.a_raw = a_sensor;
+        self.tangential_sensor = a_tangential;
+        self.a_centripetal = a_centripetal;
         self.a_meas = a_meas;
 
-        // ───── 3. 予測の目標値（DCモーターモデル + 連立方程式） ─────
+        // ───── 2. 予測の目標値（DCモーターモデル + 連立方程式） ─────
         let v_applied = self.cfg.v_batt * (self.command_lp / self.cfg.pwm_max);
         let omega_wheel = self.v / self.cfg.wheel_radius;
         let tau_eff = self.cfg.motor_efficiency * self.cfg.k_tau * v_applied
@@ -342,14 +257,7 @@ impl PositionEkf {
         let a_target = self.compute_translational_accel(tau_eff, pitch_cg, pitch_rate);
         self.a_target = a_target;
 
-        // ───── 4. sign_agree（jerkベース） ─────
-        let da_target = a_target - self.prev_a_target;
-        let da_meas = a_meas - self.prev_a_meas;
-        let sign_agree = if (da_target * da_meas) > 0.0 { 1.0 } else { 0.0 };
-        let alpha_sign = Self::clamp(dt / (self.cfg.sign_lpf_tau + dt + 1e-6), 0.0, 1.0);
-        self.sign_agree_lp += alpha_sign * (sign_agree - self.sign_agree_lp);
-
-        // ───── 5. adaptive R ─────
+        // ───── 3. adaptive R（jerk/accel/velベース） ─────
         let j_meas = (a_meas - self.prev_a_meas) / dt;
         let jerk_ratio = j_meas.abs() / (self.cfg.j_max + 1e-6);
         let a_ratio = self.a.abs() / (self.cfg.a_max + 1e-6);
@@ -359,11 +267,7 @@ impl PositionEkf {
             + self.cfg.constraint_r_scale * (jerk_ratio * jerk_ratio + a_ratio * a_ratio + v_ratio * v_ratio);
         self.r_eff = self.cfg.r_accel * r_scale;
 
-        // ───── 6. sign_agree連動プロセスノイズ ─────
-        let q_a = Self::lerp(self.cfg.q_a_min, self.cfg.q_a_max, 1.0 - self.sign_agree_lp);
-        self.q_a_actual = q_a;
-
-        // ───── 7. 状態予測（a = a_target直接、jerk/accel/vel制限あり） ─────
+        // ───── 4. 状態予測（a = a_target直接、jerk/accel/vel制限あり） ─────
         let mut da = a_target - self.a;
         let da_max = self.cfg.j_max * dt;
         let jerk_limited = da.abs() > da_max;
@@ -374,87 +278,136 @@ impl PositionEkf {
         self.v += self.a * dt;
         self.v = Self::clamp(self.v, -self.cfg.v_max, self.cfg.v_max);
         self.x += self.v * dt;
+        // b: ランダムウォーク、予測では変化しない
 
-        // ───── 8. 共分散予測 ─────
+        // ───── 5. 共分散予測 ─────
+        // F = [[1,  0,  φ·dt,  0],
+        //      [dt, 1,  φ·dt², 0],
+        //      [0,  0,  φ,     0],
+        //      [0,  0,  0,     1]]
         let phi = if jerk_limited { 1.0 } else { 0.0 };
 
-        let mut f = [[0.0f32; 3]; 3];
+        let mut f = [[0.0f32; 4]; 4];
         f[0][0] = 1.0;
         f[0][2] = phi * dt;
         f[1][0] = dt;
         f[1][1] = 1.0;
         f[1][2] = phi * dt * dt;
         f[2][2] = phi;
+        f[3][3] = 1.0;
 
-        let mut q = [[0.0f32; 3]; 3];
+        let mut q = [[0.0f32; 4]; 4];
         q[0][0] = self.cfg.q_v * dt;
         q[1][1] = self.cfg.q_x * dt;
-        q[2][2] = q_a * dt;
+        q[2][2] = self.cfg.q_a * dt;
+        q[3][3] = self.cfg.q_bias * dt;
 
         let p0 = self.p;
-        let mut fp = [[0.0f32; 3]; 3];
-        for i in 0..3 {
-            for j in 0..3 {
+        let mut fp = [[0.0f32; 4]; 4];
+        for i in 0..4 {
+            for j in 0..4 {
                 let mut s = 0.0;
-                for k in 0..3 { s += f[i][k] * p0[k][j]; }
+                for k in 0..4 { s += f[i][k] * p0[k][j]; }
                 fp[i][j] = s;
             }
         }
-        let mut p_pred = [[0.0f32; 3]; 3];
-        for i in 0..3 {
-            for j in 0..3 {
+        let mut p_pred = [[0.0f32; 4]; 4];
+        for i in 0..4 {
+            for j in 0..4 {
                 let mut s = 0.0;
-                for k in 0..3 { s += fp[i][k] * f[j][k]; }
+                for k in 0..4 { s += fp[i][k] * f[j][k]; }
                 p_pred[i][j] = s + q[i][j];
             }
         }
         Self::symmetrize(&mut p_pred);
         self.p = p_pred;
 
-        // ───── 9a. 観測更新1: 加速度（短期補正） ─────
-        self.innovation = a_meas - self.a;
-        let k1 = self.scalar_observation_update(2, self.innovation, self.r_eff);
-        self.k_gain_a = k1[2];
+        // ───── 6. 観測更新: H = [0, 0, 1, 1] ─────
+        // innovation = a_meas - (a + b)
+        self.innovation = a_meas - (self.a + self.b);
 
-        // ───── 9b. 観測更新2: 位置参照（長期ドリフト抑制） ─────
-        self.innovation_pos = 0.0 - self.x;
-        let k2 = self.scalar_observation_update(1, self.innovation_pos, self.cfg.r_pos);
-        self.k_gain_pos = k2[1];
+        // S = H·P·H^T + R = P[2][2] + P[2][3] + P[3][2] + P[3][3] + R
+        let s = self.p[2][2] + self.p[2][3] + self.p[3][2] + self.p[3][3] + self.r_eff;
+        let s_inv = 1.0 / (s + 1e-9);
+
+        // K = P·H^T / S → K[i] = (P[i][2] + P[i][3]) / S
+        let mut k = [0.0f32; 4];
+        for i in 0..4 {
+            k[i] = (self.p[i][2] + self.p[i][3]) * s_inv;
+        }
+
+        // 状態更新
+        self.v += k[0] * self.innovation;
+        self.x += k[1] * self.innovation;
+        self.a += k[2] * self.innovation;
+        self.b += k[3] * self.innovation;
+
+        self.k_gain_a = k[2];
+        self.k_gain_bias = k[3];
+
+        // Joseph形式: P = (I - K·H)·P·(I - K·H)^T + K·R·K^T
+        // A = I - K·H, where H = [0, 0, 1, 1]
+        // A[i][j] = δ_ij - K[i]·H[j]
+        //   → A[i][2] -= K[i], A[i][3] -= K[i], 他はδ_ij
+        let mut a_mat = [[0.0f32; 4]; 4];
+        for i in 0..4 {
+            a_mat[i][i] = 1.0;
+            a_mat[i][2] -= k[i];
+            a_mat[i][3] -= k[i];
+        }
+
+        let p_before = self.p;
+        let mut ap = [[0.0f32; 4]; 4];
+        for i in 0..4 {
+            for j in 0..4 {
+                let mut ss = 0.0;
+                for kk in 0..4 { ss += a_mat[i][kk] * p_before[kk][j]; }
+                ap[i][j] = ss;
+            }
+        }
+        let mut p_new = [[0.0f32; 4]; 4];
+        for i in 0..4 {
+            for j in 0..4 {
+                let mut ss = 0.0;
+                for kk in 0..4 { ss += ap[i][kk] * a_mat[j][kk]; }
+                p_new[i][j] = ss;
+            }
+        }
+        for i in 0..4 {
+            for j in 0..4 { p_new[i][j] += k[i] * self.r_eff * k[j]; }
+        }
+
+        Self::symmetrize(&mut p_new);
+        self.p = p_new;
 
         self.prev_a_meas = a_meas;
         self.prev_a_target = a_target;
 
-        // ───── 10. レギュレータ出力 ─────
-        let raw = self.cfg.k_pos * self.x + self.cfg.k_vel * self.v;
-        self.cfg.max_output * tanhf(raw / self.cfg.max_output)
-    }
-
-    pub fn state(&self) -> PosEkfState {
+        // ───── 7. 状態を返す ─────
         PosEkfState {
             velocity: self.v, position: self.x, accel: self.a,
-            innovation: self.innovation, innovation_pos: self.innovation_pos,
-            sign_agree_lp: self.sign_agree_lp, r_eff: self.r_eff,
+            bias: self.b,
+            innovation: self.innovation,
+            r_eff: self.r_eff,
             a_meas: self.a_meas, a_raw: self.a_raw, a_target: self.a_target,
             command_lp: self.command_lp,
             tangential_sensor: self.tangential_sensor,
             a_centripetal: self.a_centripetal,
             tau_eff: self.tau_eff,
-            q_a: self.q_a_actual,
-            k_gain_a: self.k_gain_a, k_gain_pos: self.k_gain_pos,
+            k_gain_a: self.k_gain_a, k_gain_bias: self.k_gain_bias,
         }
     }
 
     pub fn reset(&mut self) {
-        self.v = 0.0; self.x = 0.0; self.a = 0.0;
-        self.p = [[0.0; 3]; 3];
-        self.p[0][0] = 0.01; self.p[1][1] = 0.01; self.p[2][2] = 0.5;
-        self.sign_agree_lp = 0.5; self.innovation = 0.0; self.innovation_pos = 0.0;
+        self.v = 0.0; self.x = 0.0; self.a = 0.0; self.b = 0.0;
+        self.p = [[0.0; 4]; 4];
+        self.p[0][0] = 0.01; self.p[1][1] = 0.01; self.p[2][2] = 0.5; self.p[3][3] = 0.1;
+        self.innovation = 0.0;
         self.prev_a_meas = 0.0; self.prev_a_target = 0.0; self.command_lp = 0.0;
         self.r_eff = self.cfg.r_accel; self.a_meas = 0.0; self.a_raw = 0.0; self.a_target = 0.0;
         self.tangential_sensor = 0.0;
         self.a_centripetal = 0.0;
         self.tau_eff = 0.0;
-        self.q_a_actual = self.cfg.q_a_max;
-        self.k_gain_a = 0.0; self.k_gain_pos = 0.0;
+        self.k_gain_a = 0.0; self.k_gain_bias = 0.0;
     }
 }

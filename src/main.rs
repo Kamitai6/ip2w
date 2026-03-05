@@ -519,7 +519,6 @@ fn main() -> ! {
     let mut pos_ekf = pos_ekf::PositionEkf::new(pos_ekf::PosEkfConfig {
         dt: DT,
 
-        // torque_to_pwm: TORQUE_TO_PWM,
         k_tau: 0.002452,       // Nm/V (FM90 datasheet: 0.01471Nm / 6V)
         k_b: 0.001081,         // Nm·s/rad (FM90 datasheet: 0.01471Nm / 13.61rad/s)
         v_batt: v,           // 初期化時に実測値で上書き
@@ -538,29 +537,24 @@ fn main() -> ! {
         a_max: 50.0,
         v_max: 5.0,
 
-        command_lpf_tau: 0.003183,
-        sign_lpf_tau: 0.1,
+        command_lpf_tau: 0.003183, // 50Hz
 
-        r_accel: 1000.0,
+        r_accel: 0.01, //加速度センサの分散の2乗にすればよいらしい
         constraint_r_scale: 2.0,
-        r_pos: 0.01,
 
         // プロセス（予測）ノイズ
-        q_a_min: 10.0,
-        q_a_max: 100.0,
+        q_a: 10.0,
         q_v: 1e-3,
         q_x: 1e-4,
-
-        k_pos: 0.01,
-        k_vel: 0.1,
-        max_output: 0.4,
+        q_bias: 1e-3,
 
         ..Default::default()
     });
     let mut smd = ista_smd::ImplicitSmd::new(33.54, 550.0, DT); //L=500 1.5√L ​と 1.1L
     smd.init_state(0.0);
+    let mut pos_pid = pid::PID::new(DT, 0.01, 0.01, 0.1).with_integral_limits(1.0);
 
-    let mut yaw_pid = pid::PID::new(DT, 0.0, 0.0, 20.0);
+    let mut yaw_pid = pid::PID::new(DT, 10.0, 0.0, 20.0); //yawはI_gain=0のほうがよかった
 
     let timer0 = timg0.timer0;
     timer0.set_interrupt_handler(tg0_t0_handler);
@@ -667,10 +661,11 @@ fn main() -> ! {
                             let alpha_smd = DT / (0.00318 + DT); // 50Hz == 加速度センサ
                             smd_lpf += alpha_smd * (state.pitch_rate - smd_lpf);
                             let smd_angular_accel = smd.update(smd_lpf);
-                            target_angle = 0.0 - pos_ekf.update(total_output.clamp(-U_MAX, U_MAX), ax, az, state.pitch, now_angle, state.pitch_rate, smd_angular_accel);
+                            let p_state = pos_ekf.update(total_output.clamp(-U_MAX, U_MAX), ax, az, state.pitch, now_angle, state.pitch_rate, smd_angular_accel);
+                            target_angle = 0.0 - pos_pid.update_with_d(p_state.position, p_state.velocity).clamp(-0.4, 0.4);
 
                             if counter % PRINT_DIV == 0 {
-                                let ps = pos_ekf.state();
+                                let ps = p_state.clone();
                                 udp_println!(
                                     "{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3}",
                                     ps.position,          // 0
@@ -678,10 +673,10 @@ fn main() -> ! {
                                     ps.a_target,          // 2
                                     ps.a_meas,            // 3
                                     ps.accel,             // 4
+                                    ps.bias,
                                     ps.innovation,        // 7
-                                    ps.innovation_pos,    // 12
                                     ps.k_gain_a,          // 10
-                                    ps.k_gain_pos,        // 11
+                                    ps.k_gain_bias,
                                     ps.a_raw,
                                     ps.tangential_sensor, // 13
                                     ps.a_centripetal,     // 14
