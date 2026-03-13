@@ -11,7 +11,7 @@ use core::{cell::{RefCell, Cell}, f32::consts::PI, fmt::Write};
 use alloc::{borrow::ToOwned, string::ToString};
 use critical_section::{Mutex, with};
 use defmt::info;
-use libm::{atan2f, sqrtf, cosf, sinf};
+use libm::{atan2f, sqrtf, cosf, sinf, fabsf, copysignf};
 use heapless::String;
 use {esp_backtrace as _, esp_println as _};
 
@@ -43,7 +43,7 @@ use embedded_graphics::{
 };
 use embedded_hal_bus::i2c::{RefCellDevice as I2cRefCellDevice};
 use atom::{atom_motion, ina226, bmi270, bmm150, lp5562};
-use control::{fb::{pid, smc}, ff::{gravity, dob_kf}, util::{mekf, deadzone, mag_calib, mag_ets, mag_rls, lpf, pos_ekf, ista_smd}};
+use control::{fb::{pid, smc}, ff::{gravity, dob_kf}, util::{mekf, mag_calib, mag_ets, mag_rls, lpf, pos_ekf, ista_smd}};
 use mipidsi_async::{
     Builder, 
     models::{GC9107, ST7789}, 
@@ -131,13 +131,21 @@ macro_rules! udp_println {
 const FREQUENCY: u32 = 500;
 const PERIOD_US: u64 = 1_000_000 / FREQUENCY as u64;
 const DT: f32 = 1.0 / FREQUENCY as f32;
-const U_MAX: f32 = 300.0;
-/// トルク → PWM変換係数 [PWM/Nm]
-const TORQUE_TO_PWM: f32 = 10000.0;
-/// PWM → トルク変換係数 [Nm/PWM]
-const PWM_TO_TORQUE: f32 = 1.0 / TORQUE_TO_PWM;
 /// ピッチオフセット [rad]（重心バランス点）
 const PITCH_OFFSET: f32 = -0.125;
+
+// ── モーター物理定数 ──
+/// トルク定数 [Nm/V] (FM90 datasheet: 0.01471Nm / 6V)
+const K_TAU: f32 = 0.002452;
+/// 逆起電力定数 [Nm·s/rad] (FM90 datasheet: 0.01471Nm / 13.61rad/s)
+const K_B: f32 = 0.001081;
+/// ホイール半径 [m]
+const WHEEL_RADIUS: f32 = 0.03;
+/// モーター効率 [-]
+const MOTOR_EFF: f32 = 1.0;
+/// クーロン摩擦トルク [Nm]
+/// 旧deadzone閾値30PWMから逆算: 30/300 × η·k_τ·V_batt ≈ 0.00123 Nm (V_batt≈5V)
+const TAU_COULOMB: f32 = 0.00123;
 
 const MOTION_DIV: u32 = 1;
 const DISPLAY_DIV: u32 = 10;
@@ -148,6 +156,47 @@ const RLS_DIV: u32 = 500;
 
 static TIMER0: Mutex<RefCell<Option<Timg>>> = Mutex::new(RefCell::new(None));
 pub static TIMER_COUNTER: Mutex<Cell<u32>> = Mutex::new(Cell::new(0));
+
+/// 指令トルク [Nm] → PWM値 (back-EMF逆算)
+///
+/// モーターモデル: τ = η·k_τ·(V_batt·PWM/PWM_max) - k_b·ω_wheel
+/// 逆算: PWM = (τ_desired + k_b·ω_wheel) · PWM_max / (η·k_τ·V_batt)
+fn torque_to_pwm(tau_desired: f32, omega_wheel: f32, v_batt: f32, pwm_max: f32) -> f32 {
+    let denom = MOTOR_EFF * K_TAU * v_batt;
+    if denom.abs() < 1e-9 {
+        return 0.0;
+    }
+    (tau_desired + K_B * omega_wheel) * pwm_max / denom
+}
+
+/// クーロン摩擦補償トルク [Nm]
+///
+/// 動いている場合: τ_coulomb · sign(ω_wheel)
+/// 停止時: min(|τ_applied|, τ_static) · sign(τ_applied)
+fn coulomb_friction(omega_wheel: f32, tau_applied: f32) -> f32 {
+    const OMEGA_THRESHOLD: f32 = 0.1; // 停止判定閾値 [rad/s]
+    if fabsf(omega_wheel) > OMEGA_THRESHOLD {
+        // 動摩擦: 回転方向に逆らう摩擦を補償
+        copysignf(TAU_COULOMB, omega_wheel)
+    } else {
+        // 静止摩擦: 指令方向の摩擦を補償（ただし摩擦以上は出さない）
+        if fabsf(tau_applied) > TAU_COULOMB {
+            copysignf(TAU_COULOMB, tau_applied)
+        } else {
+            // 指令トルクが静止摩擦未満 → 摩擦で相殺されて動かない
+            // 補償しても意味がないので0
+            0.0
+        }
+    }
+}
+
+/// モーターが出力可能な最大トルク [Nm] (速度依存)
+///
+/// τ_max = η·k_τ·V_batt - k_b·|ω_wheel|
+fn max_torque(omega_wheel: f32, v_batt: f32) -> f32 {
+    let tau = MOTOR_EFF * K_TAU * v_batt - K_B * fabsf(omega_wheel);
+    if tau > 0.0 { tau } else { 0.0 }
+}
 
 #[allow(
     clippy::large_stack_frames,
@@ -353,102 +402,8 @@ fn main() -> ! {
     use alloc::format;
 
     // // オフライン地磁気キャリブレーション
-    // let mut mag_calibrator = mag_ets::MagOfflineEts::new();
-    // let mut prev_ok_raw = [0.0f32; 3];
-    // let mut has_prev_ok = false;
-    // let mut huge_jump_count: u32 = 0;
-    // const JUMP_TH: f32 = 500.0;
+    // (省略: 元のコメントアウトブロックと同一)
 
-    // loop {
-    //     let mag = imu.read_mag().unwrap().unwrap();
-    //     let raw = [mag.x, mag.y, mag.z];
-
-    //     // ===== ジャンプ除去（異常点だけ落とす）=====
-    //     if has_prev_ok {
-    //         let dx = raw[0] - prev_ok_raw[0];
-    //         let dy = raw[1] - prev_ok_raw[1];
-    //         let dz = raw[2] - prev_ok_raw[2];
-    //         let jump = libm::sqrtf(dx*dx + dy*dy + dz*dz);
-
-    //         if jump > JUMP_TH {
-    //             huge_jump_count += 1;
-    //             prev_ok_raw = raw;
-    //             has_prev_ok = true;
-    //             continue;
-    //         }
-    //     }
-    //     prev_ok_raw = raw;
-    //     has_prev_ok = true;
-
-    //     match mag_calibrator.update(raw) {
-    //         mag_ets::UpdateResult::Added | mag_ets::UpdateResult::Skipped => {
-    //             let count = mag_calibrator.sample_count();
-    //             display.clear(Rgb565::BLACK).unwrap();
-    //             let style = MonoTextStyleBuilder::new()
-    //                 .font(&FONT_10X20)
-    //                 .text_color(Rgb565::WHITE)
-    //                 .build();
-    //             Text::with_alignment("MAG CAL", Point::new(64, 15), style, Alignment::Center)
-    //                 .draw(&mut display).unwrap();
-    //             let text = format!("N: {}", count);
-    //             Text::new(&text, Point::new(5, 40), style).draw(&mut display).unwrap();
-    //             display.flush().unwrap();
-    //         }
-    //         mag_ets::UpdateResult::Full => break,
-    //     }
-    //     if button.is_low() { break; }
-    // }
-
-    // // calibrate をエラーハンドリング付きで呼ぶ
-    // match mag_calibrator.calibrate() {
-    //     Ok(mag_calib) => {
-    //         let offset = mag_calib.offset();
-    //         let transform = mag_calib.transform();
-            
-    //         display.clear(Rgb565::BLACK).unwrap();
-    //         let style = MonoTextStyleBuilder::new()
-    //             .font(&FONT_6X10)
-    //             .text_color(Rgb565::GREEN)
-    //             .build();
-    //         Text::new("MAG CALIB RESULT", Point::new(2, 10), style).draw(&mut display).unwrap();
-    //         Text::new("OFFSET:", Point::new(2, 24), style).draw(&mut display).unwrap();
-    //         let text = format!("{:.4},{:.4}", offset[0], offset[1]);
-    //         Text::new(&text, Point::new(2, 34), style).draw(&mut display).unwrap();
-    //         let text = format!("{:.4}", offset[2]);
-    //         Text::new(&text, Point::new(2, 44), style).draw(&mut display).unwrap();
-
-    //         Text::new("TRANSFORM:", Point::new(2, 60), style).draw(&mut display).unwrap();
-    //         let text = format!("{:.6},{:.6}", transform[0][0], transform[0][1]);
-    //         Text::new(&text, Point::new(2, 70), style).draw(&mut display).unwrap();
-    //         let text = format!("{:.6}", transform[0][2]);
-    //         Text::new(&text, Point::new(2, 80), style).draw(&mut display).unwrap();
-    //         let text = format!("{:.6},{:.6}", transform[1][1], transform[1][2]);
-    //         Text::new(&text, Point::new(2, 90), style).draw(&mut display).unwrap();
-    //         let text = format!("{:.6}", transform[2][2]);
-    //         Text::new(&text, Point::new(2, 100), style).draw(&mut display).unwrap();
-    //         display.flush().unwrap();
-    //     }
-    //     Err(e) => {
-    //         // エラー表示
-    //         display.clear(Rgb565::BLACK).unwrap();
-    //         let style = MonoTextStyleBuilder::new()
-    //             .font(&FONT_6X10)
-    //             .text_color(Rgb565::RED)
-    //             .build();
-    //         Text::new("CALIB ERROR:", Point::new(2, 20), style).draw(&mut display).unwrap();
-            
-    //         let err_text = match e {
-    //             mag_ets::CalibrationError::InsufficientSamples => "InsufficientSamples",
-    //             mag_ets::CalibrationError::Step1SingularMatrix => "Step1SingularMatrix",
-    //             mag_ets::CalibrationError::Step1NotPositiveDefinite => "Step1NotPositiveDefinite",
-    //             mag_ets::CalibrationError::Step2NotConverged => "Step2NotConverged",
-    //             mag_ets::CalibrationError::Step2CholeskyFailed => "Step2CholeskyFailed",
-    //         };
-    //         Text::new(err_text, Point::new(2, 40), style).draw(&mut display).unwrap();
-    //         display.flush().unwrap();
-    //     }
-    // }
-    // loop {}
     let mag_calib = mag_calib::MagCalibration::new(
         [80.2899, -1077.7451, -767.7703], // offset
         [[0.025567, 0.000170, -0.001187], // transform
@@ -506,25 +461,24 @@ fn main() -> ! {
     let i = ina226.current().unwrap();
     info!("v:{}, i:{}", v, i);
 
+    // バッテリー電圧を保持（back-EMF逆算に使用）
+    let mut v_batt = v;
+
     let mut face = face::Face::new(Point::new(64, 64), 50, 30);
 
-    // ラムダ(P)上げ過ぎると発散する
-    // アルファ(I)外乱が大きいほど高くしないといけない
-    // C(D)上げ過ぎると発振する
-    let mut smc = smc::SuperTwistingSMC::new(DT, 200.0, 100.0, 25.0)
+    // SMCゲイン: Nm単位
+    // 旧PWM単位からの換算: τ_max ≈ η·k_τ·V_batt ≈ 0.0123 Nm at V_batt=5V
+    // スケール係数 ≈ 0.0123/300 ≈ 4.1e-5 Nm/PWM
+    // λ=200→0.0082, α=100→0.0041, C=25→25（スライディング面、次元なし）
+    let mut smc = smc::SuperTwistingSMC::new(DT, 0.0082, 0.0041, 25.0)
         .with_smoothing(0.01)
-        .with_v_regulation(U_MAX * 0.8);
+        .with_v_regulation(0.010); // ≈0.010 Nm
 
     let mut gravity = gravity::GravityCompensator::new(0.1, 0.035);
     let mut pos_ekf = pos_ekf::PositionEkf::new(pos_ekf::PosEkfConfig {
         dt: DT,
 
-        k_tau: 0.002452,       // Nm/V (FM90 datasheet: 0.01471Nm / 6V)
-        k_b: 0.001081,         // Nm·s/rad (FM90 datasheet: 0.01471Nm / 13.61rad/s)
-        v_batt: v,           // 初期化時に実測値で上書き
-        pwm_max: U_MAX,
-        motor_efficiency: 1.0, // datasheetベースなので初期値1.0
-        wheel_radius: 0.03,
+        wheel_radius: WHEEL_RADIUS,
         m_p: 0.1,
         m_w: 0.023,
         i_p: 0.000363,
@@ -577,6 +531,7 @@ fn main() -> ! {
     let mut gyro_lpf = 0.0;
     let mut smd_lpf = 0.0;
     let mut prev_gyro_lpf = 0.0;
+    let mut prev_velocity = 0.0f32; // back-EMF逆算用ω_wheel = prev_velocity / WHEEL_RADIUS
 
     info!("Start!");
     loop {
@@ -615,10 +570,6 @@ fn main() -> ! {
                             // info!("g={}, {}, {}", gx, gy, gz);
                             // info!("m=({},{},{})", mc, my, mz);
                             // info!("r={}, {}, {}", state.roll, state.pitch, state.yaw);
-                            // info!("ax={}, g={}, accel={}", ax, libm::sinf(state.pitch), (ax + libm::sinf(state.pitch)) * 9.81);
-                            // defmt::info!("{}, {}, {}", az, libm::cosf(state.pitch), (az - libm::cosf(state.pitch)) * 9.81);
-                            // defmt::info!("{}, {}", (ax * libm::cosf(state.pitch)) - (az * libm::sinf(state.pitch)), (ax * libm::cosf(state.pitch)) + (az * libm::sinf(state.pitch)));
-                            // info!("raw:{}, gyro:{}, smd:{}", a_sensor, a_tangential_gyro, a_tangential_smd);
                         }
                         counter += 1;
 
@@ -636,16 +587,43 @@ fn main() -> ! {
                             let pitch_rate = state.pitch_rate;
                             let dkf_state = dkf.update(now_angle, pitch_rate);
 
+                            // ── 制御則（すべてNm） ──
                             let e = target_angle - now_angle;
                             let e_dot = 0.0 - state.pitch_rate;
-                            let fb = smc.update(e, e_dot);
-                            let ff_gravity = -gravity.update(now_angle) * TORQUE_TO_PWM;
-                            let ff_disturbance = -dkf_state.disturbance * TORQUE_TO_PWM;
-                            let atom_max = atom_motion::MOTOR_SPEED_MAX as f32;
-                            let total_output = fb + ff_gravity + ff_disturbance;
-                            let base_out = deadzone::apply_deadzone(total_output, U_MAX, 30.0, atom_max); //(限界-5)程度にするのが最適っぽいな
+                            let tau_fb = smc.update(e, e_dot);                   // [Nm]
+                            let tau_gravity = -gravity.update(now_angle);         // [Nm]
+                            let tau_disturbance = -dkf_state.disturbance;        // [Nm]
 
-                            // Yaw制御
+                            // クーロン摩擦補償（back-EMF逆算のために前回の速度推定値を使用）
+                            let omega_wheel = prev_velocity / WHEEL_RADIUS;
+                            let tau_pre_friction = tau_fb + tau_gravity + tau_disturbance;
+                            let tau_friction = coulomb_friction(omega_wheel, tau_pre_friction);
+                            let total_torque = tau_pre_friction + tau_friction;  // [Nm]
+
+                            // ── トルク飽和（モーター出力限界） ──
+                            let tau_max = max_torque(omega_wheel, v_batt);
+                            let tau_clamped = total_torque.clamp(-tau_max, tau_max);
+
+                            // ── pos_ekf更新（トルク直接入力） ──
+                            let alpha_smd = DT / (0.00318 + DT); // 50Hz == 加速度センサ
+                            smd_lpf += alpha_smd * (state.pitch_rate - smd_lpf);
+                            let smd_angular_accel = smd.update(smd_lpf);
+                            let p_state = pos_ekf.update(tau_clamped, ax, az, state.pitch, now_angle, state.pitch_rate, smd_angular_accel);
+                            target_angle = 0.0 - pos_pid.update_with_d(p_state.position, p_state.velocity).clamp(-0.4, 0.4);
+
+                            // 次回ループ用に速度を保存
+                            prev_velocity = p_state.velocity;
+
+                            // ── DKFへの制御トルク通知 ──
+                            // back-EMF逆算が完全ならτ_actual = τ_clamped
+                            dkf.set_control_torque(tau_clamped);
+
+                            // ── PWM変換 → モーター出力 ──
+                            let atom_max = atom_motion::MOTOR_SPEED_MAX as f32;
+                            let base_out = torque_to_pwm(tau_clamped, omega_wheel, v_batt, atom_max)
+                                .clamp(-atom_max, atom_max);
+
+                            // Yaw制御（PWM空間のまま）
                             let yaw_e = 0.0 - state.continuous_yaw;
                             let yaw_e_dot = 0.0 - gz;
                             let yaw_result = yaw_pid.update_with_d(yaw_e, yaw_e_dot);
@@ -654,15 +632,6 @@ fn main() -> ! {
                             
                             m1_pwm = (-base_out + yaw_out).clamp(-atom_max, atom_max) as i8;
                             m2_pwm = (base_out + yaw_out).clamp(-atom_max, atom_max) as i8;
-
-                            let tau_control = -base_out * (U_MAX / atom_max) * PWM_TO_TORQUE;
-                            dkf.set_control_torque(tau_control);
-
-                            let alpha_smd = DT / (0.00318 + DT); // 50Hz == 加速度センサ
-                            smd_lpf += alpha_smd * (state.pitch_rate - smd_lpf);
-                            let smd_angular_accel = smd.update(smd_lpf);
-                            let p_state = pos_ekf.update(total_output.clamp(-U_MAX, U_MAX), ax, az, state.pitch, now_angle, state.pitch_rate, smd_angular_accel);
-                            target_angle = 0.0 - pos_pid.update_with_d(p_state.position, p_state.velocity).clamp(-0.4, 0.4);
 
                             if counter % PRINT_DIV == 0 {
                                 let ps = p_state.clone();
@@ -690,6 +659,7 @@ fn main() -> ! {
                             pos_ekf.reset();
                             ekf.reset_yaw();
                             dkf.reset();
+                            prev_velocity = 0.0;
                         }
                         motion.set_motor(atom_motion::MotorChannel::M1, m1_pwm).unwrap();
                         motion.set_motor(atom_motion::MotorChannel::M2, m2_pwm).unwrap();

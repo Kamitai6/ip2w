@@ -133,7 +133,7 @@ impl DobKf {
         // 状態予測
         // ω(k|k-1) = ω(k-1) + (dt/I) * [τ_prev + τ_gravity + d]
         let omega_pred =
-            self.omega + self.dt_over_i * (-self.tau_prev + tau_gravity + self.d);
+            self.omega + self.dt_over_i * (self.tau_prev + tau_gravity + self.d);
         let d_pred = self.d; // 外乱は定数モデル（ランダムウォーク）
 
         // 共分散予測
@@ -214,19 +214,6 @@ impl DobKf {
     #[inline]
     pub fn set_control_torque(&mut self, tau: f32) {
         self.tau_prev = tau;
-    }
-
-    /// 推定角加速度を取得 [rad/s²]
-    ///
-    /// 動力学モデル: α = (-τ_motor + mgl·sin(θ) + d) / I
-    /// DKFの予測ステップと同じ式を使用。
-    ///
-    /// # Arguments
-    /// * `pitch` - 現在のピッチ角 [rad]（オフセット込み）
-    #[inline]
-    pub fn get_angular_accel(&self, pitch: f32) -> f32 {
-        let tau_gravity = self.config.mgl * sinf(pitch);
-        (-self.tau_prev + tau_gravity + self.d) / self.config.inertia
     }
 
     /// リセット

@@ -1,17 +1,19 @@
 use libm::{sinf, cosf};
 
-/// 並進位置推定EKF（v9e: 推定専用、レギュレータ分離）
+/// 並進位置推定EKF（v10: トルク直接入力化）
 ///
-/// 【v9d→v9e 変更】
-/// - レギュレータを外部PIDに分離。update()はPosEkfStateを返すのみ。
-/// - state()メソッドを廃止、update()が直接PosEkfStateを返す。
-/// - tanhf依存を削除。
-/// - 予測ステップの積分に一次ホールド（FOH）の厳密解を適用
+/// 【v9e→v10 変更】
+/// - update()の第1引数をPWM値[PWM]からトルク指令値[Nm]に変更。
+/// - 内部のDCモーターモデル（PWM→電圧→トルク）を除去。
+///   メインループ側でback-EMF逆算を行うため、pos_ekf内部での変換は不要。
+/// - PosEkfConfigからk_tau, k_b, v_batt, pwm_max, motor_efficiencyを削除。
+/// - command_lp → tau_lp にリネーム（LPF特性は同一、単位がNmに変更）。
 ///
-/// 【v9d からの継続仕様】
+/// 【v9eからの継続仕様】
 /// - 状態 [v, x, a, b]（4状態）、bはa_measセンサバイアス
 /// - 観測: innovation = a_meas - (a + b), H = [0, 0, 1, 1]
 /// - jerk/accel/velベースのadaptive Rは維持
+/// - 予測ステップの積分に一次ホールド（FOH）の厳密解を適用
 ///
 /// 【絶対遵守仕様（AIへの指示・忘却防止用）】
 /// 1. a_measの全体符号反転（a_meas = -v̇）は既存規約。変更禁止。
@@ -28,11 +30,6 @@ use libm::{sinf, cosf};
 pub struct PosEkfConfig {
     // ── 物理（連立方程式パラメータ） ──
     pub dt: f32,
-    pub k_tau: f32,            // 出力軸トルク定数 [Nm/V]（datasheet: τ_stall / V）
-    pub k_b: f32,              // 逆起電力トルク係数 [Nm·s/rad]（datasheet: τ_stall / ω_noload）
-    pub v_batt: f32,           // バッテリ電圧 [V]（初期化時に実測値で上書き）
-    pub pwm_max: f32,          // PWM最大値
-    pub motor_efficiency: f32, // 駆動トルクに掛ける効率係数（<1で推定トルク減少）
     pub wheel_radius: f32,     // r: ホイール半径 [m]
     pub m_p: f32,              // 胴体（振り子）の質量 [kg]
     pub m_w: f32,              // ホイールの質量 [kg]（両輪合計）
@@ -66,11 +63,6 @@ impl Default for PosEkfConfig {
         Self {
             dt: 0.002,
 
-            k_tau: 0.002452,
-            k_b: 0.001081,
-            v_batt: 3.7,
-            pwm_max: 300.0,
-            motor_efficiency: 1.0,
             wheel_radius: 0.03,
             m_p: 0.1,
             m_w: 0.01,
@@ -111,7 +103,7 @@ pub struct PosEkfState {
     pub a_raw: f32,
     pub a_target: f32,
 
-    pub command_lp: f32,
+    pub tau_lp: f32,
     pub tangential_sensor: f32,
     pub a_centripetal: f32,
     pub tau_eff: f32,
@@ -135,7 +127,7 @@ pub struct PositionEkf {
 
     prev_a_meas: f32,
     prev_a_target: f32,
-    command_lp: f32,
+    tau_lp: f32,
 
     r_eff: f32,
     a_meas: f32,
@@ -168,7 +160,7 @@ impl PositionEkf {
             p,
             m_total,
             innovation: 0.0,
-            prev_a_meas: 0.0, prev_a_target: 0.0, command_lp: 0.0,
+            prev_a_meas: 0.0, prev_a_target: 0.0, tau_lp: 0.0,
             r_eff: cfg.r_accel, a_meas: 0.0, a_raw: 0.0, a_target: 0.0,
             tangential_sensor: 0.0,
             a_centripetal: 0.0,
@@ -217,19 +209,19 @@ impl PositionEkf {
     }
 
     /// # Arguments
-    /// * `command` - 制御出力（total_output）[PWM]
+    /// * `tau_commanded` - 制御トルク指令値 [Nm]（クランプ済み）
     /// * `ax_g` - 加速度センサX軸 [G]
     /// * `az_g` - 加速度センサZ軸 [G]
     /// * `pitch_sensor` - ピッチ角（センサ位置基準）[rad]
     /// * `pitch_cg` - ピッチ角（重心基準）[rad]
     /// * `pitch_rate` - MEKFバイアス除去済みピッチ角速度 [rad/s]
     /// * `angular_accel` - ジャイロLPF微分による角加速度 [rad/s²]
-    pub fn update(&mut self, command: f32, ax_g: f32, az_g: f32, pitch_sensor: f32, pitch_cg: f32, pitch_rate: f32, angular_accel: f32) -> PosEkfState {
+    pub fn update(&mut self, tau_commanded: f32, ax_g: f32, az_g: f32, pitch_sensor: f32, pitch_cg: f32, pitch_rate: f32, angular_accel: f32) -> PosEkfState {
         let dt = self.cfg.dt;
 
-        // ───── 0. コマンドLPF ─────
+        // ───── 0. トルク指令LPF ─────
         let alpha_cmd = Self::clamp(dt / (self.cfg.command_lpf_tau + dt + 1e-6), 0.0, 1.0);
-        self.command_lp += alpha_cmd * (command - self.command_lp);
+        self.tau_lp += alpha_cmd * (tau_commanded - self.tau_lp);
 
         // ───── 1. 観測（完全なIMU物理モデル） ─────
         let cos_s = cosf(pitch_sensor);
@@ -249,11 +241,8 @@ impl PositionEkf {
         self.a_centripetal = a_centripetal;
         self.a_meas = a_meas;
 
-        // ───── 2. 予測の目標値（DCモーターモデル + 連立方程式） ─────
-        let v_applied = self.cfg.v_batt * (self.command_lp / self.cfg.pwm_max);
-        let omega_wheel = self.v / self.cfg.wheel_radius;
-        let tau_eff = self.cfg.motor_efficiency * self.cfg.k_tau * v_applied
-                    - self.cfg.k_b * omega_wheel;
+        // ───── 2. 予測の目標値（トルク直接入力 + 連立方程式） ─────
+        let tau_eff = self.tau_lp;
         self.tau_eff = tau_eff;
         let a_target = self.compute_translational_accel(tau_eff, pitch_cg, pitch_rate);
         self.a_target = a_target;
@@ -404,7 +393,7 @@ impl PositionEkf {
             innovation: self.innovation,
             r_eff: self.r_eff,
             a_meas: self.a_meas, a_raw: self.a_raw, a_target: self.a_target,
-            command_lp: self.command_lp,
+            tau_lp: self.tau_lp,
             tangential_sensor: self.tangential_sensor,
             a_centripetal: self.a_centripetal,
             tau_eff: self.tau_eff,
@@ -417,7 +406,7 @@ impl PositionEkf {
         self.p = [[0.0; 4]; 4];
         self.p[0][0] = 0.01; self.p[1][1] = 0.01; self.p[2][2] = 0.5; self.p[3][3] = 0.1;
         self.innovation = 0.0;
-        self.prev_a_meas = 0.0; self.prev_a_target = 0.0; self.command_lp = 0.0;
+        self.prev_a_meas = 0.0; self.prev_a_target = 0.0; self.tau_lp = 0.0;
         self.r_eff = self.cfg.r_accel; self.a_meas = 0.0; self.a_raw = 0.0; self.a_target = 0.0;
         self.tangential_sensor = 0.0;
         self.a_centripetal = 0.0;
