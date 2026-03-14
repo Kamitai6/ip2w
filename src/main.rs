@@ -433,7 +433,7 @@ fn main() -> ! {
         inertia: 0.000363, //(1/3)*0.1*(0.1*0.1+0.03*0.03)=0.000363333333333
         mgl: 0.1 * 9.81 * 0.035,  // ≈ 0.034 Nm
         q_omega: 0.1,
-        q_disturbance: 1e-6,     // 調整ポイント: 大きくすると追従速く、小さくすると滑らか
+        q_disturbance: 1e-8,     // 調整ポイント: 大きくすると追従速く、小さくすると滑らか
         r_gyro: 0.001,
         disturbance_limit: 0.05,    // ±0.05 Nm
         ..Default::default()
@@ -467,12 +467,9 @@ fn main() -> ! {
     let mut face = face::Face::new(Point::new(64, 64), 50, 30);
 
     // SMCゲイン: Nm単位
-    // 旧PWM単位からの換算: τ_max ≈ η·k_τ·V_batt ≈ 0.0123 Nm at V_batt=5V
-    // スケール係数 ≈ 0.0123/300 ≈ 4.1e-5 Nm/PWM
-    // λ=200→0.0082, α=100→0.0041, C=25→25（スライディング面、次元なし）
-    let mut smc = smc::SuperTwistingSMC::new(DT, 0.0082, 0.0041, 25.0)
+    let mut smc = smc::SuperTwistingSMC::new(DT, 0.0085, 0.001, 10.0)
         .with_smoothing(0.01)
-        .with_v_regulation(0.010); // ≈0.010 Nm
+        .with_v_regulation(0.01); // ≈0.01 Nm
 
     let mut gravity = gravity::GravityCompensator::new(0.1, 0.035);
     let mut pos_ekf = pos_ekf::PositionEkf::new(pos_ekf::PosEkfConfig {
@@ -599,21 +596,16 @@ fn main() -> ! {
                             let tau_friction = coulomb_friction(omega_wheel, tau_pre_friction);
                             let total_torque = tau_pre_friction + tau_friction;  // [Nm]
 
-                            defmt::info!("{}, {}, {}, {}", tau_fb,
-                                    tau_gravity,
-                                    tau_disturbance,
-                                    tau_friction,);
-
                             // ── トルク飽和（モーター出力限界） ──
-                            let tau_max = max_torque(omega_wheel, v_batt);
-                            let tau_clamped = total_torque.clamp(-tau_max, tau_max);
+                            // let tau_max = max_torque(omega_wheel, v_batt);
+                            let tau_clamped = total_torque;//total_torque.clamp(-tau_max, tau_max);
 
                             // ── pos_ekf更新（トルク直接入力） ──
                             let alpha_smd = DT / (0.00318 + DT); // 50Hz == 加速度センサ
                             smd_lpf += alpha_smd * (state.pitch_rate - smd_lpf);
                             let smd_angular_accel = smd.update(smd_lpf);
                             let p_state = pos_ekf.update(tau_clamped, ax, az, state.pitch, now_angle, state.pitch_rate, smd_angular_accel);
-                            target_angle = 0.0 - pos_pid.update_with_d(p_state.position, p_state.velocity).clamp(-0.4, 0.4);
+                            target_angle = 0.0;// - pos_pid.update_with_d(p_state.position, p_state.velocity).clamp(-0.4, 0.4);
 
                             // 次回ループ用に速度を保存
                             prev_velocity = p_state.velocity;
@@ -629,7 +621,7 @@ fn main() -> ! {
 
                             // Yaw制御（PWM空間のまま）
                             let yaw_e = 0.0 - state.continuous_yaw;
-                            let yaw_e_dot = 0.0 - gz;
+                            let yaw_e_dot = 0.0 - state.yaw_rate;
                             let yaw_result = yaw_pid.update_with_d(yaw_e, yaw_e_dot);
                             let yaw_out_max = atom_motion::MOTOR_SPEED_MAX as f32 / 4.0;
                             let yaw_out = yaw_result.clamp(-yaw_out_max, yaw_out_max);
@@ -640,23 +632,9 @@ fn main() -> ! {
                             if counter % PRINT_DIV == 0 {
                                 let ps = p_state.clone();
                                 udp_println!(
-                                    "{:.3},{:.3},{:.3},{:.3},{:.3},{:.3}",
-                                    ps.position,          // 0
-                                    ps.velocity,          // 1
-                                    tau_fb,
-                                    tau_gravity,
-                                    tau_disturbance,
-                                    tau_friction,
-                                    // ps.a_target,          // 2
-                                    // ps.a_meas,            // 3
-                                    // ps.accel,             // 4
-                                    // ps.bias,
-                                    // ps.innovation,        // 7
-                                    // ps.k_gain_a,          // 10
-                                    // ps.k_gain_bias,
-                                    // ps.a_raw,
-                                    // ps.tangential_sensor, // 13
-                                    // ps.a_centripetal,     // 14
+                                    "{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3}",
+                                    base_out, yaw_out, m1_pwm, m2_pwm, 
+                                    state.continuous_yaw, state.yaw_rate, state.pitch, state.pitch_rate, 
                                 );
                             }
                         } else {
