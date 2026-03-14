@@ -584,21 +584,25 @@ fn main() -> ! {
 
                         if drive {
                             let now_angle = state.pitch - PITCH_OFFSET;
-                            let pitch_rate = state.pitch_rate;
-                            let dkf_state = dkf.update(now_angle, pitch_rate);
+                            let dkf_state = dkf.update(now_angle, state.pitch_rate);
 
                             // ── 制御則（すべてNm） ──
                             let e = target_angle - now_angle;
                             let e_dot = 0.0 - state.pitch_rate;
                             let tau_fb = smc.update(e, e_dot);                   // [Nm]
                             let tau_gravity = -gravity.update(now_angle);         // [Nm]
-                            let tau_disturbance = -dkf_state.disturbance;        // [Nm]
+                            let tau_disturbance = dkf_state.disturbance;        // [Nm]
 
                             // クーロン摩擦補償（back-EMF逆算のために前回の速度推定値を使用）
                             let omega_wheel = prev_velocity / WHEEL_RADIUS;
                             let tau_pre_friction = tau_fb + tau_gravity + tau_disturbance;
                             let tau_friction = coulomb_friction(omega_wheel, tau_pre_friction);
                             let total_torque = tau_pre_friction + tau_friction;  // [Nm]
+
+                            defmt::info!("{}, {}, {}, {}", tau_fb,
+                                    tau_gravity,
+                                    tau_disturbance,
+                                    tau_friction,);
 
                             // ── トルク飽和（モーター出力限界） ──
                             let tau_max = max_torque(omega_wheel, v_batt);
@@ -636,19 +640,23 @@ fn main() -> ! {
                             if counter % PRINT_DIV == 0 {
                                 let ps = p_state.clone();
                                 udp_println!(
-                                    "{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3}",
+                                    "{:.3},{:.3},{:.3},{:.3},{:.3},{:.3}",
                                     ps.position,          // 0
                                     ps.velocity,          // 1
-                                    ps.a_target,          // 2
-                                    ps.a_meas,            // 3
-                                    ps.accel,             // 4
-                                    ps.bias,
-                                    ps.innovation,        // 7
-                                    ps.k_gain_a,          // 10
-                                    ps.k_gain_bias,
-                                    ps.a_raw,
-                                    ps.tangential_sensor, // 13
-                                    ps.a_centripetal,     // 14
+                                    tau_fb,
+                                    tau_gravity,
+                                    tau_disturbance,
+                                    tau_friction,
+                                    // ps.a_target,          // 2
+                                    // ps.a_meas,            // 3
+                                    // ps.accel,             // 4
+                                    // ps.bias,
+                                    // ps.innovation,        // 7
+                                    // ps.k_gain_a,          // 10
+                                    // ps.k_gain_bias,
+                                    // ps.a_raw,
+                                    // ps.tangential_sensor, // 13
+                                    // ps.a_centripetal,     // 14
                                 );
                             }
                         } else {
@@ -656,6 +664,7 @@ fn main() -> ! {
                             m2_pwm = 0;
                             smc.reset();
                             yaw_pid.reset();
+                            pos_pid.reset();
                             pos_ekf.reset();
                             ekf.reset_yaw();
                             dkf.reset();
