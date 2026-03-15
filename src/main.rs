@@ -190,14 +190,6 @@ fn coulomb_friction(omega_wheel: f32, tau_applied: f32) -> f32 {
     }
 }
 
-/// モーターが出力可能な最大トルク [Nm] (速度依存)
-///
-/// τ_max = η·k_τ·V_batt - k_b·|ω_wheel|
-fn max_torque(omega_wheel: f32, v_batt: f32) -> f32 {
-    let tau = MOTOR_EFF * K_TAU * v_batt - K_B * fabsf(omega_wheel);
-    if tau > 0.0 { tau } else { 0.0 }
-}
-
 #[allow(
     clippy::large_stack_frames,
     reason = "it's not unusual to allocate larger buffers etc. in main"
@@ -468,7 +460,7 @@ fn main() -> ! {
 
     // SMCゲイン: Nm単位
     let mut smc = smc::SuperTwistingSMC::new(DT, 0.0085, 0.001, 10.0)
-        .with_smoothing(0.01)
+        .with_smoothing(0.001)
         .with_v_regulation(0.01); // ≈0.01 Nm
 
     let mut gravity = gravity::GravityCompensator::new(0.1, 0.035);
@@ -561,6 +553,7 @@ fn main() -> ! {
                         if counter % MAG_DIV == 0 {
                             // ekf.update_mag_yaw(mx, my, mz);
                         }
+                        let now_angle = state.pitch - PITCH_OFFSET;
 
                         if counter % PRINT_DIV == 0 {
                             // info!("a={}, {}, {}", ax, ay, az);
@@ -575,19 +568,18 @@ fn main() -> ! {
                         }
                         button_state = button.is_low();
 
-                        if state.roll.abs() > 0.5 || state.pitch.abs() > 0.5 {
+                        if state.roll.abs() > 0.5 || now_angle.abs() > 0.5 {
                             drive = false;
                         }
 
                         if drive {
-                            let now_angle = state.pitch - PITCH_OFFSET;
                             let dkf_state = dkf.update(now_angle, state.pitch_rate);
 
                             // ── 制御則（すべてNm） ──
                             let e = target_angle - now_angle;
                             let e_dot = 0.0 - state.pitch_rate;
                             let tau_fb = smc.update(e, e_dot);                   // [Nm]
-                            let tau_gravity = -gravity.update(now_angle);         // [Nm]
+                            let tau_gravity = gravity.update(now_angle);         // [Nm]
                             let tau_disturbance = dkf_state.disturbance;        // [Nm]
 
                             // クーロン摩擦補償（back-EMF逆算のために前回の速度推定値を使用）
