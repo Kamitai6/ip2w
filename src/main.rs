@@ -175,16 +175,16 @@ fn torque_to_pwm(tau_desired: f32, omega_wheel: f32, v_batt: f32, pwm_max: f32) 
 /// 停止時: min(|τ_applied|, τ_static) · sign(τ_applied)
 fn coulomb_friction(omega_wheel: f32, tau_applied: f32) -> f32 {
     const OMEGA_THRESHOLD: f32 = 0.1; // 停止判定閾値 [rad/s]
+
     if fabsf(omega_wheel) > OMEGA_THRESHOLD {
         // 動摩擦: 回転方向に逆らう摩擦を補償
         copysignf(TAU_COULOMB, omega_wheel)
     } else {
-        // 静止摩擦: 指令方向の摩擦を補償（ただし摩擦以上は出さない）
-        if fabsf(tau_applied) > TAU_COULOMB {
+        // 静止摩擦: SMCの要求トルク方向へ即座にフルアシスト
+        if fabsf(tau_applied) > 1e-4 {
             copysignf(TAU_COULOMB, tau_applied)
         } else {
-            // 指令トルクが静止摩擦未満 → 摩擦で相殺されて動かない
-            // 補償しても意味がないので0
+            // SMCからの要求がほぼゼロ（ノイズレベル）の時は何もしない
             0.0
         }
     }
@@ -459,7 +459,7 @@ fn main() -> ! {
     let mut face = face::Face::new(Point::new(64, 64), 50, 30);
 
     // SMCゲイン: Nm単位
-    let mut smc = smc::SuperTwistingSMC::new(DT, 0.0085, 0.001, 10.0)
+    let mut smc = smc::SuperTwistingSMC::new(DT, 0.0085, 0.001, 15.0)
         .with_smoothing(0.001)
         .with_v_regulation(0.01); // ≈0.01 Nm
 
@@ -588,15 +588,11 @@ fn main() -> ! {
                             let tau_friction = coulomb_friction(omega_wheel, tau_pre_friction);
                             let total_torque = tau_pre_friction + tau_friction;  // [Nm]
 
-                            // ── トルク飽和（モーター出力限界） ──
-                            // let tau_max = max_torque(omega_wheel, v_batt);
-                            let tau_clamped = total_torque;//total_torque.clamp(-tau_max, tau_max);
-
                             // ── pos_ekf更新（トルク直接入力） ──
                             let alpha_smd = DT / (0.00318 + DT); // 50Hz == 加速度センサ
                             smd_lpf += alpha_smd * (state.pitch_rate - smd_lpf);
                             let smd_angular_accel = smd.update(smd_lpf);
-                            let p_state = pos_ekf.update(tau_clamped, ax, az, state.pitch, now_angle, state.pitch_rate, smd_angular_accel);
+                            let p_state = pos_ekf.update(total_torque, ax, az, state.pitch, now_angle, state.pitch_rate, smd_angular_accel);
                             target_angle = 0.0;// - pos_pid.update_with_d(p_state.position, p_state.velocity).clamp(-0.4, 0.4);
 
                             // 次回ループ用に速度を保存
@@ -604,11 +600,11 @@ fn main() -> ! {
 
                             // ── DKFへの制御トルク通知 ──
                             // back-EMF逆算が完全ならτ_actual = τ_clamped
-                            dkf.set_control_torque(tau_clamped);
+                            dkf.set_control_torque(total_torque);
 
                             // ── PWM変換 → モーター出力 ──
                             let atom_max = atom_motion::MOTOR_SPEED_MAX as f32;
-                            let base_out = torque_to_pwm(tau_clamped, omega_wheel, v_batt, atom_max)
+                            let base_out = torque_to_pwm(total_torque, omega_wheel, v_batt, atom_max)
                                 .clamp(-atom_max, atom_max);
 
                             // Yaw制御（PWM空間のまま）
