@@ -560,6 +560,9 @@ fn main() -> ! {
                             // info!("g={}, {}, {}", gx, gy, gz);
                             // info!("m=({},{},{})", mc, my, mz);
                             // info!("r={}, {}, {}", state.roll, state.pitch, state.yaw);
+                            udp_println!(
+                                "{:.3},{:.3}", v, i,
+                            );
                         }
                         counter += 1;
 
@@ -593,7 +596,7 @@ fn main() -> ! {
                             smd_lpf += alpha_smd * (state.pitch_rate - smd_lpf);
                             let smd_angular_accel = smd.update(smd_lpf);
                             let p_state = pos_ekf.update(total_torque, ax, az, state.pitch, now_angle, state.pitch_rate, smd_angular_accel);
-                            target_angle = 0.0;// - pos_pid.update_with_d(p_state.position, p_state.velocity).clamp(-0.4, 0.4);
+                            target_angle = 0.0 - pos_pid.update_with_d(p_state.position, p_state.velocity).clamp(-0.4, 0.4);
 
                             // 次回ループ用に速度を保存
                             prev_velocity = p_state.velocity;
@@ -611,7 +614,7 @@ fn main() -> ! {
                             let yaw_e = 0.0 - state.continuous_yaw;
                             let yaw_e_dot = 0.0 - state.yaw_rate;
                             let yaw_result = yaw_pid.update_with_d(yaw_e, yaw_e_dot);
-                            let yaw_out_max = atom_motion::MOTOR_SPEED_MAX as f32 / 4.0;
+                            let yaw_out_max = atom_motion::MOTOR_SPEED_MAX as f32 / 5.0;
                             let yaw_out = yaw_result.clamp(-yaw_out_max, yaw_out_max);
                             
                             m1_pwm = (-base_out + yaw_out).clamp(-atom_max, atom_max) as i8;
@@ -619,11 +622,9 @@ fn main() -> ! {
 
                             if counter % PRINT_DIV == 0 {
                                 let ps = p_state.clone();
-                                udp_println!(
-                                    "{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3}",
-                                    base_out, yaw_out, m1_pwm, m2_pwm, 
-                                    state.continuous_yaw, state.yaw_rate, state.pitch, state.pitch_rate, 
-                                );
+                                // udp_println!(
+                                //     "{:.3}", v
+                                // );
                             }
                         } else {
                             m1_pwm = 0;
