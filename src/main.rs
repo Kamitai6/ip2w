@@ -514,33 +514,31 @@ fn main() -> ! {
         b_aug: MODEL_B_AUG,
         // --- ここを調整 ---
         q_diag: [
-            1.0 / (0.3 * 0.3),    // x_pos:    許容 0.3 m
-            1.0 / (0.05 * 0.05),   // θ_pitch:  許容 0.05 rad (~3°)
-            1.0 / (0.2 * 0.2),    // ψ_yaw:    許容 0.2 rad (~11°)
-            1.0 / (5.0 * 5.0),    // w:        許容 5.0
-            1.0 / (1.0 * 1.0),    // ∫e_pos:   許容 1.0 m·s
-            1.0 / (1.0 * 1.0),    // ∫e_yaw:   許容 1.0 rad·s
+            1.0 / (0.3 * 0.3),    // x_pos:    許容 m
+            1.0 / (0.05 * 0.05),  // θ_pitch:  許容 rad
+            1.0 / (0.2 * 0.2),    // ψ_yaw:    許容 rad
+            1.0 / (5.0 * 5.0),    // w:        許容 
+            1.0 / (5.0 * 5.0),    // ∫e_pos:   許容 m·s
+            1.0 / (1.0 * 1.0),    // ∫e_yaw:   許容 rad·s
         ],
         r_diag: [
-            1.0 / (0.5 * 0.5),    // v_pos:    許容 0.5 m/s
-            1.0 / (3.0 * 3.0),    // ω_yaw:    許容 3.0 rad/s
+            1.0 / (0.2 * 0.2),    // v_pos:    許容 m/s
+            1.0 / (1.0 * 1.0),    // ω_yaw:    許容 rad/s
         ],
         // --- ここまで ---
         ch: [
             // ch[0]: pitch/position channel
             lq_stsmc::StsmcChannelConfig {
-                lambda: 0.1,
+                lambda: 0.05,
                 alpha: 0.01,
                 epsilon: 0.05,
-                v_leak: 0.01,
                 v_limit: 50.0,
             },
             // ch[1]: yaw channel
             lq_stsmc::StsmcChannelConfig {
-                lambda: 0.5,
+                lambda: 0.1,
                 alpha: 0.05,
                 epsilon: 0.05,
-                v_leak: 0.01,
                 v_limit: 50.0,
             },
         ],

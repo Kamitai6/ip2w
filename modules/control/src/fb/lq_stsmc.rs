@@ -17,7 +17,8 @@ const N_AUG: usize = 8;
 const N1: usize = 6; // z₁ 次元 (非駆動)
 const N2: usize = 2; // z₂ 次元 (駆動) = 入力数
 const H_DIM: usize = 12; // ハミルトン行列サイズ = 2 * N1
-const DELTA: f32 = 1e-6;
+const DELTA: f32 = 0.00001;
+const V_LEAK: f32 = 0.00001;
 
 // ============================================================
 // 行列演算ヘルパー
@@ -212,7 +213,6 @@ pub struct StsmcChannelConfig {
     pub lambda: f32,
     pub alpha: f32,
     pub epsilon: f32,
-    pub v_leak: f32,
     pub v_limit: f32,
 }
 
@@ -340,7 +340,7 @@ impl LqStsmc {
         for i in 0..N2 {
             let sat = tanhf(sigma[i] / self.ch[i].epsilon);
 
-            self.w[i] = ((1.0 - self.ch[i].v_leak * dt) * self.w[i]
+            self.w[i] = ((1.0 - V_LEAK * dt) * self.w[i]
                 - self.ch[i].alpha * sat * dt)
                 .clamp(-self.ch[i].v_limit, self.ch[i].v_limit);
 
