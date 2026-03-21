@@ -43,8 +43,7 @@ use embedded_graphics::{
 };
 use embedded_hal_bus::i2c::{RefCellDevice as I2cRefCellDevice};
 use atom::{atom_motion, ina226, bmi270, bmm150, lp5562};
-// [CHANGED] pid, smc → lq_stsmc
-use control::{fb::lq_stsmc, ff::{gravity, dob_kf}, util::{mekf, mag_calib, mag_ets, mag_rls, lpf, pos_ekf, ista_smd}};
+use control::{fb::lq_stsmc, ff::dob_kf, util::{mekf, mag_calib, mag_ets, mag_rls, lpf, pos_ekf, ista_smd}};
 use mipidsi_async::{
     Builder, 
     models::{GC9107, ST7789}, 
@@ -69,7 +68,6 @@ struct UdpLoggerState {
     buffer: String<UDP_LOG_BUF_SIZE>,
 }
 
-// どこからでもアクセスできるグローバルな状態
 static UDP_LOGGER_STATE: Mutex<RefCell<UdpLoggerState>> = Mutex::new(RefCell::new(UdpLoggerState {
     target: None,
     buffer: String::new(),
@@ -189,7 +187,7 @@ fn coulomb_friction(omega_wheel: f32, tau_applied: f32) -> f32 {
 }
 
 // ============================================================
-// [CHANGED] 物理モデル定数 (Python transform_v1 の出力、固定)
+// 物理モデル定数 (Python transform_v1 の出力、固定)
 // これらは物理パラメータのみに依存し、Q/Rには無関係
 // ============================================================
 
@@ -322,8 +320,8 @@ fn main() -> ! {
 
     let mut udp_rx_meta = [smoltcp::socket::udp::PacketMetadata::EMPTY; 1];
     let mut udp_tx_meta = [smoltcp::socket::udp::PacketMetadata::EMPTY; 1];
-    let mut udp_rx_buffer = [0u8; 1024];
-    let mut udp_tx_buffer = [0u8; 1024];
+    let mut udp_rx_buffer = [0u8; 1024]; // 受信しないなら小さくてもOKですが念のため
+    let mut udp_tx_buffer = [0u8; 1024]; // 送信データの最大長
 
     let mut udp_socket = net_stack.get_udp_socket(
         &mut udp_rx_meta,
@@ -333,6 +331,7 @@ fn main() -> ! {
     );
     udp_socket.bind(45678).unwrap();
 
+    // デバッグ先PCのIPとポートを設定
     let target_ip = smoltcp::wire::IpAddress::Ipv4(smoltcp::wire::Ipv4Address::new(192, 168, 4, 2));
     udp_logger_init(target_ip, 5000);
 
@@ -426,12 +425,23 @@ fn main() -> ! {
 
     /* calibration */
     imu.calibrate_acc(bmi270::CalibAccConfig::z_up(), |us| delay.delay_micros(us)).unwrap();
+    // let (ax, ay, az) = imu.read_acc_offset();
+    // info!("AccelOffset: x={}, y={}, z={}", ax, ay, az);
     imu.write_acc_offset((33, -123, -144));
 
+    // imu.calibrate_gyro(|us| delay.delay_micros(us)).unwrap();
+    // // 冷えた状態
+    // let (temp1, offset1) = imu.capture_gyr_temp_point(|us| delay.delay_micros(us)).unwrap();
+    // defmt::info!("{}, {}, {}, {}", temp1, offset1.0, offset1.1, offset1.2);
+    // loop {}
+    // // 温まった状態
+    // let (temp2, offset2) = imu.capture_gyr_temp_point(|us| delay.delay_micros(us)).unwrap();
+    // defmt::info!("{}, {}, {}, {}", temp2, offset2.0, offset2.1, offset2.2);
+    // loop {}
     let calib = bmi270::GyrTempCalibration::from_two_points(
         29.734032, (-3, 2, -5), 
         47.609695, (-5, -13, -13));
-    imu.set_gyr_temp_calibration(calib, 1.0);
+    imu.set_gyr_temp_calibration(calib, 1.0);  // 時定数1秒
 
     // 空読み（必須 & 重要）
     for _ in 0..3 {
@@ -441,16 +451,115 @@ fn main() -> ! {
 
     use alloc::format;
 
+    // // オフライン地磁気キャリブレーション
+    // let mut mag_calibrator = mag_ets::MagOfflineEts::new();
+    // let mut prev_ok_raw = [0.0f32; 3];
+    // let mut has_prev_ok = false;
+    // let mut huge_jump_count: u32 = 0;
+    // const JUMP_TH: f32 = 500.0;
+
+    // loop {
+    //     let mag = imu.read_mag().unwrap().unwrap();
+    //     let raw = [mag.x, mag.y, mag.z];
+
+    //     // ===== ジャンプ除去（異常点だけ落とす）=====
+    //     if has_prev_ok {
+    //         let dx = raw[0] - prev_ok_raw[0];
+    //         let dy = raw[1] - prev_ok_raw[1];
+    //         let dz = raw[2] - prev_ok_raw[2];
+    //         let jump = libm::sqrtf(dx*dx + dy*dy + dz*dz);
+
+    //         if jump > JUMP_TH {
+    //             huge_jump_count += 1;
+    //             prev_ok_raw = raw;
+    //             has_prev_ok = true;
+    //             continue;
+    //         }
+    //     }
+    //     prev_ok_raw = raw;
+    //     has_prev_ok = true;
+
+    //     match mag_calibrator.update(raw) {
+    //         mag_ets::UpdateResult::Added | mag_ets::UpdateResult::Skipped => {
+    //             let count = mag_calibrator.sample_count();
+    //             display.clear(Rgb565::BLACK).unwrap();
+    //             let style = MonoTextStyleBuilder::new()
+    //                 .font(&FONT_10X20)
+    //                 .text_color(Rgb565::WHITE)
+    //                 .build();
+    //             Text::with_alignment("MAG CAL", Point::new(64, 15), style, Alignment::Center)
+    //                 .draw(&mut display).unwrap();
+    //             let text = format!("N: {}", count);
+    //             Text::new(&text, Point::new(5, 40), style).draw(&mut display).unwrap();
+    //             display.flush().unwrap();
+    //         }
+    //         mag_ets::UpdateResult::Full => break,
+    //     }
+    //     if button.is_low() { break; }
+    // }
+
+    // // calibrate をエラーハンドリング付きで呼ぶ
+    // match mag_calibrator.calibrate() {
+    //     Ok(mag_calib) => {
+    //         let offset = mag_calib.offset();
+    //         let transform = mag_calib.transform();
+            
+    //         display.clear(Rgb565::BLACK).unwrap();
+    //         let style = MonoTextStyleBuilder::new()
+    //             .font(&FONT_6X10)
+    //             .text_color(Rgb565::GREEN)
+    //             .build();
+    //         Text::new("MAG CALIB RESULT", Point::new(2, 10), style).draw(&mut display).unwrap();
+    //         Text::new("OFFSET:", Point::new(2, 24), style).draw(&mut display).unwrap();
+    //         let text = format!("{:.4},{:.4}", offset[0], offset[1]);
+    //         Text::new(&text, Point::new(2, 34), style).draw(&mut display).unwrap();
+    //         let text = format!("{:.4}", offset[2]);
+    //         Text::new(&text, Point::new(2, 44), style).draw(&mut display).unwrap();
+
+    //         Text::new("TRANSFORM:", Point::new(2, 60), style).draw(&mut display).unwrap();
+    //         let text = format!("{:.6},{:.6}", transform[0][0], transform[0][1]);
+    //         Text::new(&text, Point::new(2, 70), style).draw(&mut display).unwrap();
+    //         let text = format!("{:.6}", transform[0][2]);
+    //         Text::new(&text, Point::new(2, 80), style).draw(&mut display).unwrap();
+    //         let text = format!("{:.6},{:.6}", transform[1][1], transform[1][2]);
+    //         Text::new(&text, Point::new(2, 90), style).draw(&mut display).unwrap();
+    //         let text = format!("{:.6}", transform[2][2]);
+    //         Text::new(&text, Point::new(2, 100), style).draw(&mut display).unwrap();
+    //         display.flush().unwrap();
+    //     }
+    //     Err(e) => {
+    //         // エラー表示
+    //         display.clear(Rgb565::BLACK).unwrap();
+    //         let style = MonoTextStyleBuilder::new()
+    //             .font(&FONT_6X10)
+    //             .text_color(Rgb565::RED)
+    //             .build();
+    //         Text::new("CALIB ERROR:", Point::new(2, 20), style).draw(&mut display).unwrap();
+            
+    //         let err_text = match e {
+    //             mag_ets::CalibrationError::InsufficientSamples => "InsufficientSamples",
+    //             mag_ets::CalibrationError::Step1SingularMatrix => "Step1SingularMatrix",
+    //             mag_ets::CalibrationError::Step1NotPositiveDefinite => "Step1NotPositiveDefinite",
+    //             mag_ets::CalibrationError::Step2NotConverged => "Step2NotConverged",
+    //             mag_ets::CalibrationError::Step2CholeskyFailed => "Step2CholeskyFailed",
+    //         };
+    //         Text::new(err_text, Point::new(2, 40), style).draw(&mut display).unwrap();
+    //         display.flush().unwrap();
+    //     }
+    // }
+    // loop {}
+
     let mag_calib = mag_calib::MagCalibration::new(
-        [80.2899, -1077.7451, -767.7703],
-        [[0.025567, 0.000170, -0.001187],
+        [80.2899, -1077.7451, -767.7703], // offset
+        [[0.025567, 0.000170, -0.001187], // transform
         [0.0000, 0.014415, 0.001860],
         [0.0000, 0.0000, 0.023254]],
     );
 
+    // オンライン地磁気キャリブレーション
     let mut rls = mag_rls::MagOnlineRls::new(&mag_calib);
 
-    let mut lpf_accel = lpf::Lpf3::new(50.0, DT);
+    let mut lpf_accel = lpf::Lpf3::new(50.0, DT); // Hz
     let mut lpf_gyro  = lpf::Lpf3::new(100.0, DT);
     let mut lpf_mag   = lpf::Lpf3::new(5.0,  DT);
 
@@ -466,12 +575,12 @@ fn main() -> ! {
 
     let mut dkf = dob_kf::DobKf::new(dob_kf::DobKfConfig {
         dt: DT,
-        inertia: 0.000363,
+        inertia: 0.000363, //(1/3)*0.1*(0.1*0.1+0.03*0.03)=0.000363333333333
         mgl: 0.1 * 9.81 * 0.035,
         q_omega: 0.1,
-        q_disturbance: 1e-8,
+        q_disturbance: 1e-8, // 調整ポイント: 大きくすると追従速く、小さくすると滑らか
         r_gyro: 0.001,
-        disturbance_limit: 0.05,
+        disturbance_limit: 0.05, // ±0.05 Nm
         ..Default::default()
     });
     info!("imu ok");
@@ -497,11 +606,12 @@ fn main() -> ! {
     let i = ina226.current().unwrap();
     info!("v:{}, i:{}", v, i);
 
+    // バッテリー電圧を保持（back-EMF逆算に使用）
     let mut v_batt = v;
 
     let mut face = face::Face::new(Point::new(64, 64), 50, 30);
 
-    // [CHANGED] LQ-STSMC: Q, R をここで調整するだけ
+    // LQ-STSMC: Q, R をここで調整するだけ
     // z₁ = [x_pos, θ_pitch, ψ_yaw, w, ∫e_pos, ∫e_yaw]
     info!("Solving CARE...");
     let mut lq_ctrl = lq_stsmc::LqStsmc::new(lq_stsmc::LqStsmcConfig {
@@ -514,31 +624,31 @@ fn main() -> ! {
         b_aug: MODEL_B_AUG,
         // --- ここを調整 ---
         q_diag: [
-            1.0 / (0.3 * 0.3),    // x_pos:    許容 m
-            1.0 / (0.05 * 0.05),  // θ_pitch:  許容 rad
-            1.0 / (0.2 * 0.2),    // ψ_yaw:    許容 rad
-            1.0 / (5.0 * 5.0),    // w:        許容 
-            1.0 / (5.0 * 5.0),    // ∫e_pos:   許容 m·s
-            1.0 / (1.0 * 1.0),    // ∫e_yaw:   許容 rad·s
+            1.0 / (0.3 * 0.3),    // x_pos:    許容 0.3 m
+            1.0 / (0.05 * 0.05),   // θ_pitch:  許容 0.05 rad (~3°)
+            1.0 / (0.2 * 0.2),    // ψ_yaw:    許容 0.2 rad (~11°)
+            1.0 / (5.0 * 5.0),    // w:        許容 5.0
+            1.0 / (5.0 * 5.0),    // ∫e_pos:   許容 1.0 m·s
+            1.0 / (1.0 * 1.0),    // ∫e_yaw:   許容 1.0 rad·s
         ],
         r_diag: [
-            1.0 / (0.2 * 0.2),    // v_pos:    許容 m/s
-            1.0 / (1.0 * 1.0),    // ω_yaw:    許容 rad/s
+            1.0 / (0.2 * 0.2),    // v_pos:    許容 0.5 m/s
+            1.0 / (1.0 * 1.0),    // ω_yaw:    許容 3.0 rad/s
         ],
         // --- ここまで ---
         ch: [
             // ch[0]: pitch/position channel
             lq_stsmc::StsmcChannelConfig {
-                lambda: 0.05,
+                lambda: 0.01,
                 alpha: 0.01,
-                epsilon: 0.05,
+                epsilon: 0.01,
                 v_limit: 50.0,
             },
             // ch[1]: yaw channel
             lq_stsmc::StsmcChannelConfig {
                 lambda: 0.1,
-                alpha: 0.05,
-                epsilon: 0.05,
+                alpha: 0.01,
+                epsilon: 0.01,
                 v_limit: 50.0,
             },
         ],
@@ -546,7 +656,6 @@ fn main() -> ! {
     });
     info!("CARE solved, LQ-STSMC ready");
 
-    let mut gravity = gravity::GravityCompensator::new(0.1, 0.035);
     let mut pos_ekf = pos_ekf::PositionEkf::new(pos_ekf::PosEkfConfig {
         dt: DT,
 
@@ -554,7 +663,7 @@ fn main() -> ! {
         m_p: 0.1,
         m_w: 0.023,
         i_p: 0.000363,
-        i_w: 0.00001035,
+        i_w: 0.00001035, //0.5*0.023*0.03^2
         l: 0.035,
         imu_rx: 0.01,
         imu_rz: 0.08,
@@ -563,11 +672,12 @@ fn main() -> ! {
         a_max: 50.0,
         v_max: 5.0,
 
-        command_lpf_tau: 0.003183,
+        command_lpf_tau: 0.003183, // 50Hz
 
-        r_accel: 0.01,
+        r_accel: 0.01, //加速度センサの分散の2乗にすればよいらしい
         constraint_r_scale: 2.0,
 
+        // プロセス（予測）ノイズ
         q_a: 10.0,
         q_v: 1e-3,
         q_x: 1e-4,
@@ -575,7 +685,7 @@ fn main() -> ! {
 
         ..Default::default()
     });
-    let mut smd = ista_smd::ImplicitSmd::new(33.54, 550.0, DT);
+    let mut smd = ista_smd::ImplicitSmd::new(33.54, 550.0, DT); //L=500 1.5√L ​と 1.1L
     smd.init_state(0.0);
 
     let timer0 = timg0.timer0;
@@ -598,7 +708,7 @@ fn main() -> ! {
     let mut gyro_lpf = 0.0;
     let mut smd_lpf = 0.0;
     let mut prev_gyro_lpf = 0.0;
-    let mut prev_velocity = 0.0f32;
+    let mut prev_velocity = 0.0f32; // back-EMF逆算用ω_wheel = prev_velocity / WHEEL_RADIUS
     let mut prev_total_pitch_torque = 0.0f32;
 
     info!("Start!");
@@ -613,6 +723,8 @@ fn main() -> ! {
                             imu.update_gyr_temp_compensation(DT * TEMP_DIV as f32).unwrap();
                         }
                         let d = imu.read_immu().unwrap();
+                        // 物理的X-up状態 → 計算用Z-up座標系への変換で
+                        // すべて、(x,y,z) => (z,-y,x)に変換しているので注意
                         let (ax, ay, az) = (d.accel.z, -d.accel.y, d.accel.x);
                         let (gx, gy, gz) = mekf::degree_to_rad((d.gyro.z, -d.gyro.y, d.gyro.x));
                         let (ax, ay, az) = lpf_accel.update(ax, ay, az);
@@ -633,6 +745,9 @@ fn main() -> ! {
                         let now_angle = state.pitch - PITCH_OFFSET;
 
                         if counter % PRINT_DIV == 0 {
+                            // info!("a={}, {}, {}", ax, ay, az);
+                            // info!("g={}, {}, {}", gx, gy, gz);
+                            // info!("m=({},{},{})", mc, my, mz);
                             udp_println!(
                                 "{:.3},{:.3}", v, i,
                             );
@@ -651,7 +766,7 @@ fn main() -> ! {
                         if drive {
                             let dkf_state = dkf.update(now_angle, state.pitch_rate);
 
-                            let alpha_smd = DT / (0.00318 + DT);
+                            let alpha_smd = DT / (0.00318 + DT); // 50Hz == 加速度センサ
                             smd_lpf += alpha_smd * (state.pitch_rate - smd_lpf);
                             let smd_angular_accel = smd.update(smd_lpf);
                             let p_state = pos_ekf.update(
@@ -671,13 +786,12 @@ fn main() -> ! {
                             ];
                             let lq_out = lq_ctrl.update(&x6, 0.0, 0.0);
 
-                            // フィードフォワード（ピッチ方向、両輪均等）
-                            let tau_gravity = gravity.update(now_angle);
+                            // フィードフォワード（DKF外乱補償、ピッチ方向、両輪均等）
+                            // 重力補償は u_eq (SA) に線形分が含まれるため不要
                             let tau_disturbance = dkf_state.disturbance;
-                            let tau_ff = tau_gravity + tau_disturbance;
 
-                            let tau_l = lq_out.tau_l + tau_ff;
-                            let tau_r = lq_out.tau_r + tau_ff;
+                            let tau_l = lq_out.tau_l + tau_disturbance;
+                            let tau_r = lq_out.tau_r + tau_disturbance;
 
                             // クーロン摩擦補償
                             let omega_wheel = prev_velocity / WHEEL_RADIUS;
@@ -720,7 +834,7 @@ fn main() -> ! {
                         let counter = critical_section::with(|cs| {
                             TIMER_COUNTER.borrow(cs).get()
                         });
-                        if counter % (FREQUENCY / 2) == 0 {
+                        if counter % (FREQUENCY / 2) == 0 { //0.5s
                             let emotion = if drive {
                                 face::Emotion::UPPER[pseudo_rand(face::Emotion::UPPER.len())]
                             } else {
