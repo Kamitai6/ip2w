@@ -43,7 +43,8 @@ use embedded_graphics::{
 };
 use embedded_hal_bus::i2c::{RefCellDevice as I2cRefCellDevice};
 use atom::{atom_motion, ina226, bmi270, bmm150, lp5562};
-use control::{fb::{pid, smc}, ff::{gravity, dob_kf}, util::{mekf, mag_calib, mag_ets, mag_rls, lpf, pos_ekf, ista_smd}};
+// [CHANGED] pid, smc → lq_stsmc
+use control::{fb::lq_stsmc, ff::{gravity, dob_kf}, util::{mekf, mag_calib, mag_ets, mag_rls, lpf, pos_ekf, ista_smd}};
 use mipidsi_async::{
     Builder, 
     models::{GC9107, ST7789}, 
@@ -177,18 +178,77 @@ fn coulomb_friction(omega_wheel: f32, tau_applied: f32) -> f32 {
     const OMEGA_THRESHOLD: f32 = 0.1; // 停止判定閾値 [rad/s]
 
     if fabsf(omega_wheel) > OMEGA_THRESHOLD {
-        // 動摩擦: 回転方向に逆らう摩擦を補償
         copysignf(TAU_COULOMB, omega_wheel)
     } else {
-        // 静止摩擦: SMCの要求トルク方向へ即座にフルアシスト
         if fabsf(tau_applied) > 1e-4 {
             copysignf(TAU_COULOMB, tau_applied)
         } else {
-            // SMCからの要求がほぼゼロ（ノイズレベル）の時は何もしない
             0.0
         }
     }
 }
+
+// ============================================================
+// [CHANGED] 物理モデル定数 (Python transform_v1 の出力、固定)
+// これらは物理パラメータのみに依存し、Q/Rには無関係
+// ============================================================
+
+/// A₁₁ (6×6): 正則変換後の非駆動部サブシステム
+/// z₁ = [x_pos, θ_pitch, ψ_yaw, w, ∫e_pos, ∫e_yaw]
+const MODEL_A11: [[f32; 6]; 6] = [
+    [0.0, 0.0,       0.0, 0.0, 0.0, 0.0],
+    [0.0, 0.0,       0.0, 1.0, 0.0, 0.0],
+    [0.0, 0.0,       0.0, 0.0, 0.0, 0.0],
+    [0.0, 58.167616, 0.0, 0.0, 0.0, 0.0],
+    [-1.0, 0.0,      0.0, 0.0, 0.0, 0.0],
+    [0.0, 0.0,      -1.0, 0.0, 0.0, 0.0],
+];
+
+/// A₁₂ (6×2): 駆動部 → 非駆動部の結合
+const MODEL_A12: [[f32; 2]; 6] = [
+    [1.0,       0.0],
+    [-14.513014, 0.0],
+    [0.0,       1.0],
+    [0.0,       0.0],
+    [0.0,       0.0],
+    [0.0,       0.0],
+];
+
+/// T (8×8): 正則変換行列  z = T · x_aug
+const MODEL_T: [[f32; 8]; 8] = [
+    [1.0, 0.0,       0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+    [0.0, 0.0,       1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+    [0.0, 0.0,       0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+    [0.0, 14.513014, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0],
+    [0.0, 0.0,       0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+    [0.0, 0.0,       0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+    [0.0, 1.0,       0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+    [0.0, 0.0,       0.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+];
+
+/// A_aug (8×8): 拡大系のシステム行列
+const MODEL_A_AUG: [[f32; 8]; 8] = [
+    [ 0.0,  1.0,    0.0, 0.0,  0.0, 0.0, 0.0, 0.0],
+    [ 0.0,  0.0,  -1.72, 0.0,  0.0, 0.0, 0.0, 0.0],
+    [ 0.0,  0.0,    0.0, 1.0,  0.0, 0.0, 0.0, 0.0],
+    [ 0.0,  0.0,  83.13, 0.0,  0.0, 0.0, 0.0, 0.0],
+    [ 0.0,  0.0,    0.0, 0.0,  0.0, 1.0, 0.0, 0.0],
+    [ 0.0,  0.0,    0.0, 0.0,  0.0, 0.0, 0.0, 0.0],
+    [-1.0,  0.0,    0.0, 0.0,  0.0, 0.0, 0.0, 0.0],
+    [ 0.0,  0.0,    0.0, 0.0, -1.0, 0.0, 0.0, 0.0],
+];
+
+/// B_aug (8×2): 拡大系の入力行列
+const MODEL_B_AUG: [[f32; 2]; 8] = [
+    [       0.0,         0.0],
+    [     282.0,       282.0],
+    [       0.0,         0.0],
+    [   -4092.67,    -4092.67],
+    [       0.0,         0.0],
+    [   13717.42,   -13717.42],
+    [       0.0,         0.0],
+    [       0.0,         0.0],
+];
 
 #[allow(
     clippy::large_stack_frames,
@@ -262,8 +322,8 @@ fn main() -> ! {
 
     let mut udp_rx_meta = [smoltcp::socket::udp::PacketMetadata::EMPTY; 1];
     let mut udp_tx_meta = [smoltcp::socket::udp::PacketMetadata::EMPTY; 1];
-    let mut udp_rx_buffer = [0u8; 1024]; // 受信しないなら小さくてもOKですが念のため
-    let mut udp_tx_buffer = [0u8; 1024]; // 送信データの最大長
+    let mut udp_rx_buffer = [0u8; 1024];
+    let mut udp_tx_buffer = [0u8; 1024];
 
     let mut udp_socket = net_stack.get_udp_socket(
         &mut udp_rx_meta,
@@ -273,7 +333,6 @@ fn main() -> ! {
     );
     udp_socket.bind(45678).unwrap();
 
-    // デバッグ先PCのIPとポートを設定
     let target_ip = smoltcp::wire::IpAddress::Ipv4(smoltcp::wire::Ipv4Address::new(192, 168, 4, 2));
     udp_logger_init(target_ip, 5000);
 
@@ -295,7 +354,7 @@ fn main() -> ! {
     let mut lp5562 = lp5562::Lp5562::new(I2cRefCellDevice::new(&i2c0_ref_cell));
     lp5562.init(&mut |us| delay.delay_micros(us)).unwrap();
     lp5562.set_current(lp5562::Channel::White, 255).unwrap();
-    lp5562.set_pwm(lp5562::Channel::White, 255).unwrap(); // 白色点灯
+    lp5562.set_pwm(lp5562::Channel::White, 255).unwrap();
     info!("lp5562 ok");
 
     let lcd_spi = Spi::new(
@@ -360,30 +419,19 @@ fn main() -> ! {
             acc_bwp: bmi270::AccBwp::Normal,
             gyr_bwp: bmi270::GyrBwp::Normal,
             perf_mode: bmi270::PerfMode::PerfOpt,
-            aux_odr: bmi270::AuxOdr::Hz50, //30Hzなので、これ以上上げると死ぬ
+            aux_odr: bmi270::AuxOdr::Hz50,
         }, 
         &mut |us| delay.delay_micros(us)
     ).unwrap();
 
     /* calibration */
     imu.calibrate_acc(bmi270::CalibAccConfig::z_up(), |us| delay.delay_micros(us)).unwrap();
-    // let (ax, ay, az) = imu.read_acc_offset();
-    // info!("AccelOffset: x={}, y={}, z={}", ax, ay, az);
     imu.write_acc_offset((33, -123, -144));
 
-    // imu.calibrate_gyro(|us| delay.delay_micros(us)).unwrap();
-    // // 冷えた状態
-    // let (temp1, offset1) = imu.capture_gyr_temp_point(|us| delay.delay_micros(us)).unwrap();
-    // defmt::info!("{}, {}, {}, {}", temp1, offset1.0, offset1.1, offset1.2);
-    // loop {}
-    // // 温まった状態
-    // let (temp2, offset2) = imu.capture_gyr_temp_point(|us| delay.delay_micros(us)).unwrap();
-    // defmt::info!("{}, {}, {}, {}", temp2, offset2.0, offset2.1, offset2.2);
-    // loop {}
     let calib = bmi270::GyrTempCalibration::from_two_points(
         29.734032, (-3, 2, -5), 
         47.609695, (-5, -13, -13));
-    imu.set_gyr_temp_calibration(calib, 1.0);  // 時定数1秒
+    imu.set_gyr_temp_calibration(calib, 1.0);
 
     // 空読み（必須 & 重要）
     for _ in 0..3 {
@@ -393,20 +441,16 @@ fn main() -> ! {
 
     use alloc::format;
 
-    // // オフライン地磁気キャリブレーション
-    // (省略: 元のコメントアウトブロックと同一)
-
     let mag_calib = mag_calib::MagCalibration::new(
-        [80.2899, -1077.7451, -767.7703], // offset
-        [[0.025567, 0.000170, -0.001187], // transform
+        [80.2899, -1077.7451, -767.7703],
+        [[0.025567, 0.000170, -0.001187],
         [0.0000, 0.014415, 0.001860],
         [0.0000, 0.0000, 0.023254]],
     );
 
-    // オンライン地磁気キャリブレーション
     let mut rls = mag_rls::MagOnlineRls::new(&mag_calib);
 
-    let mut lpf_accel = lpf::Lpf3::new(50.0, DT); // Hz
+    let mut lpf_accel = lpf::Lpf3::new(50.0, DT);
     let mut lpf_gyro  = lpf::Lpf3::new(100.0, DT);
     let mut lpf_mag   = lpf::Lpf3::new(5.0,  DT);
 
@@ -422,12 +466,12 @@ fn main() -> ! {
 
     let mut dkf = dob_kf::DobKf::new(dob_kf::DobKfConfig {
         dt: DT,
-        inertia: 0.000363, //(1/3)*0.1*(0.1*0.1+0.03*0.03)=0.000363333333333
-        mgl: 0.1 * 9.81 * 0.035,  // ≈ 0.034 Nm
+        inertia: 0.000363,
+        mgl: 0.1 * 9.81 * 0.035,
         q_omega: 0.1,
-        q_disturbance: 1e-8,     // 調整ポイント: 大きくすると追従速く、小さくすると滑らか
+        q_disturbance: 1e-8,
         r_gyro: 0.001,
-        disturbance_limit: 0.05,    // ±0.05 Nm
+        disturbance_limit: 0.05,
         ..Default::default()
     });
     info!("imu ok");
@@ -453,15 +497,56 @@ fn main() -> ! {
     let i = ina226.current().unwrap();
     info!("v:{}, i:{}", v, i);
 
-    // バッテリー電圧を保持（back-EMF逆算に使用）
     let mut v_batt = v;
 
     let mut face = face::Face::new(Point::new(64, 64), 50, 30);
 
-    // SMCゲイン: Nm単位
-    let mut smc = smc::SuperTwistingSMC::new(DT, 0.0085, 0.001, 15.0)
-        .with_smoothing(0.001)
-        .with_v_regulation(0.01); // ≈0.01 Nm
+    // [CHANGED] LQ-STSMC: Q, R をここで調整するだけ
+    // z₁ = [x_pos, θ_pitch, ψ_yaw, w, ∫e_pos, ∫e_yaw]
+    info!("Solving CARE...");
+    let mut lq_ctrl = lq_stsmc::LqStsmc::new(lq_stsmc::LqStsmcConfig {
+        dt: DT,
+        // 物理モデル定数
+        a11: MODEL_A11,
+        a12: MODEL_A12,
+        t_mat: MODEL_T,
+        a_aug: MODEL_A_AUG,
+        b_aug: MODEL_B_AUG,
+        // --- ここを調整 ---
+        q_diag: [
+            1.0 / (0.3 * 0.3),    // x_pos:    許容 0.3 m
+            1.0 / (0.05 * 0.05),   // θ_pitch:  許容 0.05 rad (~3°)
+            1.0 / (0.2 * 0.2),    // ψ_yaw:    許容 0.2 rad (~11°)
+            1.0 / (5.0 * 5.0),    // w:        許容 5.0
+            1.0 / (1.0 * 1.0),    // ∫e_pos:   許容 1.0 m·s
+            1.0 / (1.0 * 1.0),    // ∫e_yaw:   許容 1.0 rad·s
+        ],
+        r_diag: [
+            1.0 / (0.5 * 0.5),    // v_pos:    許容 0.5 m/s
+            1.0 / (3.0 * 3.0),    // ω_yaw:    許容 3.0 rad/s
+        ],
+        // --- ここまで ---
+        ch: [
+            // ch[0]: pitch/position channel
+            lq_stsmc::StsmcChannelConfig {
+                lambda: 0.1,
+                alpha: 0.01,
+                epsilon: 0.05,
+                v_leak: 0.01,
+                v_limit: 50.0,
+            },
+            // ch[1]: yaw channel
+            lq_stsmc::StsmcChannelConfig {
+                lambda: 0.5,
+                alpha: 0.05,
+                epsilon: 0.05,
+                v_leak: 0.01,
+                v_limit: 50.0,
+            },
+        ],
+        tau_limit: 0.5,
+    });
+    info!("CARE solved, LQ-STSMC ready");
 
     let mut gravity = gravity::GravityCompensator::new(0.1, 0.035);
     let mut pos_ekf = pos_ekf::PositionEkf::new(pos_ekf::PosEkfConfig {
@@ -471,7 +556,7 @@ fn main() -> ! {
         m_p: 0.1,
         m_w: 0.023,
         i_p: 0.000363,
-        i_w: 0.00001035, //0.5*0.023*0.03^2
+        i_w: 0.00001035,
         l: 0.035,
         imu_rx: 0.01,
         imu_rz: 0.08,
@@ -480,12 +565,11 @@ fn main() -> ! {
         a_max: 50.0,
         v_max: 5.0,
 
-        command_lpf_tau: 0.003183, // 50Hz
+        command_lpf_tau: 0.003183,
 
-        r_accel: 0.01, //加速度センサの分散の2乗にすればよいらしい
+        r_accel: 0.01,
         constraint_r_scale: 2.0,
 
-        // プロセス（予測）ノイズ
         q_a: 10.0,
         q_v: 1e-3,
         q_x: 1e-4,
@@ -493,11 +577,8 @@ fn main() -> ! {
 
         ..Default::default()
     });
-    let mut smd = ista_smd::ImplicitSmd::new(33.54, 550.0, DT); //L=500 1.5√L ​と 1.1L
+    let mut smd = ista_smd::ImplicitSmd::new(33.54, 550.0, DT);
     smd.init_state(0.0);
-    let mut pos_pid = pid::PID::new(DT, 0.01, 0.01, 0.1).with_integral_limits(1.0);
-
-    let mut yaw_pid = pid::PID::new(DT, 10.0, 0.0, 20.0); //yawはI_gain=0のほうがよかった
 
     let timer0 = timg0.timer0;
     timer0.set_interrupt_handler(tg0_t0_handler);
@@ -514,13 +595,13 @@ fn main() -> ! {
     let mut button_state = false;
     let mut m1_pwm = 0;
     let mut m2_pwm = 0;
-    let mut target_angle = 0.0;
     let mut counter = 0;
 
     let mut gyro_lpf = 0.0;
     let mut smd_lpf = 0.0;
     let mut prev_gyro_lpf = 0.0;
-    let mut prev_velocity = 0.0f32; // back-EMF逆算用ω_wheel = prev_velocity / WHEEL_RADIUS
+    let mut prev_velocity = 0.0f32;
+    let mut prev_total_pitch_torque = 0.0f32;
 
     info!("Start!");
     loop {
@@ -534,8 +615,6 @@ fn main() -> ! {
                             imu.update_gyr_temp_compensation(DT * TEMP_DIV as f32).unwrap();
                         }
                         let d = imu.read_immu().unwrap();
-                        // 物理的X-up状態 → 計算用Z-up座標系への変換で
-                        // すべて、(x,y,z) => (z,-y,x)に変換しているので注意
                         let (ax, ay, az) = (d.accel.z, -d.accel.y, d.accel.x);
                         let (gx, gy, gz) = mekf::degree_to_rad((d.gyro.z, -d.gyro.y, d.gyro.x));
                         let (ax, ay, az) = lpf_accel.update(ax, ay, az);
@@ -556,10 +635,6 @@ fn main() -> ! {
                         let now_angle = state.pitch - PITCH_OFFSET;
 
                         if counter % PRINT_DIV == 0 {
-                            // info!("a={}, {}, {}", ax, ay, az);
-                            // info!("g={}, {}, {}", gx, gy, gz);
-                            // info!("m=({},{},{})", mc, my, mz);
-                            // info!("r={}, {}, {}", state.roll, state.pitch, state.yaw);
                             udp_println!(
                                 "{:.3},{:.3}", v, i,
                             );
@@ -578,47 +653,52 @@ fn main() -> ! {
                         if drive {
                             let dkf_state = dkf.update(now_angle, state.pitch_rate);
 
-                            // ── 制御則（すべてNm） ──
-                            let e = target_angle - now_angle;
-                            let e_dot = 0.0 - state.pitch_rate;
-                            let tau_fb = smc.update(e, e_dot);                   // [Nm]
-                            let tau_gravity = gravity.update(now_angle);         // [Nm]
-                            let tau_disturbance = dkf_state.disturbance;        // [Nm]
-
-                            // クーロン摩擦補償（back-EMF逆算のために前回の速度推定値を使用）
-                            let omega_wheel = prev_velocity / WHEEL_RADIUS;
-                            let tau_pre_friction = tau_fb + tau_gravity + tau_disturbance;
-                            let tau_friction = coulomb_friction(omega_wheel, tau_pre_friction);
-                            let total_torque = tau_pre_friction + tau_friction;  // [Nm]
-
-                            // ── pos_ekf更新（トルク直接入力） ──
-                            let alpha_smd = DT / (0.00318 + DT); // 50Hz == 加速度センサ
+                            let alpha_smd = DT / (0.00318 + DT);
                             smd_lpf += alpha_smd * (state.pitch_rate - smd_lpf);
                             let smd_angular_accel = smd.update(smd_lpf);
-                            let p_state = pos_ekf.update(total_torque, ax, az, state.pitch, now_angle, state.pitch_rate, smd_angular_accel);
-                            target_angle = 0.0 - pos_pid.update_with_d(p_state.position, p_state.velocity).clamp(-0.4, 0.4);
+                            let p_state = pos_ekf.update(
+                                prev_total_pitch_torque,
+                                ax, az, state.pitch, now_angle,
+                                state.pitch_rate, smd_angular_accel,
+                            );
 
-                            // 次回ループ用に速度を保存
+                            // LQ-STSMC: 6状態 → [τ_L, τ_R]
+                            let x6 = [
+                                p_state.position,
+                                p_state.velocity,
+                                now_angle,
+                                state.pitch_rate,
+                                state.continuous_yaw,
+                                state.yaw_rate,
+                            ];
+                            let lq_out = lq_ctrl.update(&x6, 0.0, 0.0);
+
+                            // フィードフォワード（ピッチ方向、両輪均等）
+                            let tau_gravity = gravity.update(now_angle);
+                            let tau_disturbance = dkf_state.disturbance;
+                            let tau_ff = tau_gravity + tau_disturbance;
+
+                            let tau_l = lq_out.tau_l + tau_ff;
+                            let tau_r = lq_out.tau_r + tau_ff;
+
+                            // クーロン摩擦補償
+                            let omega_wheel = prev_velocity / WHEEL_RADIUS;
+                            let tau_l_final = tau_l + coulomb_friction(omega_wheel, tau_l);
+                            let tau_r_final = tau_r + coulomb_friction(omega_wheel, tau_r);
+
+                            let total_pitch_torque = tau_l_final + tau_r_final;
+                            prev_total_pitch_torque = total_pitch_torque;
                             prev_velocity = p_state.velocity;
 
-                            // ── DKFへの制御トルク通知 ──
-                            // back-EMF逆算が完全ならτ_actual = τ_clamped
-                            dkf.set_control_torque(total_torque);
+                            dkf.set_control_torque(total_pitch_torque);
 
-                            // ── PWM変換 → モーター出力 ──
+                            // PWM変換
                             let atom_max = atom_motion::MOTOR_SPEED_MAX as f32;
-                            let base_out = torque_to_pwm(total_torque, omega_wheel, v_batt, atom_max)
-                                .clamp(-atom_max, atom_max);
-
-                            // Yaw制御（PWM空間のまま）
-                            let yaw_e = 0.0 - state.continuous_yaw;
-                            let yaw_e_dot = 0.0 - state.yaw_rate;
-                            let yaw_result = yaw_pid.update_with_d(yaw_e, yaw_e_dot);
-                            let yaw_out_max = atom_motion::MOTOR_SPEED_MAX as f32 / 5.0;
-                            let yaw_out = yaw_result.clamp(-yaw_out_max, yaw_out_max);
+                            let m2_out = torque_to_pwm(tau_l_final, omega_wheel, v_batt, atom_max);
+                            let m1_out = -torque_to_pwm(tau_r_final, omega_wheel, v_batt, atom_max);
                             
-                            m1_pwm = (-base_out + yaw_out).clamp(-atom_max, atom_max) as i8;
-                            m2_pwm = (base_out + yaw_out).clamp(-atom_max, atom_max) as i8;
+                            m1_pwm = m1_out.clamp(-atom_max, atom_max) as i8;
+                            m2_pwm = m2_out.clamp(-atom_max, atom_max) as i8;
 
                             if counter % PRINT_DIV == 0 {
                                 let ps = p_state.clone();
@@ -629,13 +709,12 @@ fn main() -> ! {
                         } else {
                             m1_pwm = 0;
                             m2_pwm = 0;
-                            smc.reset();
-                            yaw_pid.reset();
-                            pos_pid.reset();
+                            lq_ctrl.reset();
                             pos_ekf.reset();
                             ekf.reset_yaw();
                             dkf.reset();
                             prev_velocity = 0.0;
+                            prev_total_pitch_torque = 0.0;
                         }
                         motion.set_motor(atom_motion::MotorChannel::M1, m1_pwm).unwrap();
                         motion.set_motor(atom_motion::MotorChannel::M2, m2_pwm).unwrap();
@@ -643,7 +722,7 @@ fn main() -> ! {
                         let counter = critical_section::with(|cs| {
                             TIMER_COUNTER.borrow(cs).get()
                         });
-                        if counter % (FREQUENCY / 2) == 0 { //0.5s
+                        if counter % (FREQUENCY / 2) == 0 {
                             let emotion = if drive {
                                 face::Emotion::UPPER[pseudo_rand(face::Emotion::UPPER.len())]
                             } else {
