@@ -578,7 +578,7 @@ fn main() -> ! {
         inertia: 0.000363, //(1/3)*0.1*(0.1*0.1+0.03*0.03)=0.000363333333333
         mgl: 0.1 * 9.81 * 0.035,
         q_omega: 0.1,
-        q_disturbance: 1e-8, // 調整ポイント: 大きくすると追従速く、小さくすると滑らか
+        q_disturbance: 1e-10, // 調整ポイント: 大きくすると追従速く、小さくすると滑らか
         r_gyro: 0.001,
         disturbance_limit: 0.05, // ±0.05 Nm
         ..Default::default()
@@ -640,15 +640,15 @@ fn main() -> ! {
             // ch[0]: pitch/position channel
             lq_stsmc::StsmcChannelConfig {
                 lambda: 0.01,
-                alpha: 0.01,
-                epsilon: 0.01,
+                alpha: 0.05,
+                epsilon: 0.05,
                 v_limit: 50.0,
             },
             // ch[1]: yaw channel
             lq_stsmc::StsmcChannelConfig {
-                lambda: 0.1,
-                alpha: 0.01,
-                epsilon: 0.01,
+                lambda: 0.01,
+                alpha: 0.05,
+                epsilon: 0.05,
                 v_limit: 50.0,
             },
         ],
@@ -705,9 +705,9 @@ fn main() -> ! {
     let mut m2_pwm = 0;
     let mut counter = 0;
 
-    let mut gyro_lpf = 0.0;
-    let mut smd_lpf = 0.0;
-    let mut prev_gyro_lpf = 0.0;
+    let mut gyro_lpf = 0.0f32;
+    let mut smd_lpf = 0.0f32;
+    let mut prev_gyro_lpf = 0.0f32;
     let mut prev_velocity = 0.0f32; // back-EMF逆算用ω_wheel = prev_velocity / WHEEL_RADIUS
     let mut prev_total_pitch_torque = 0.0f32;
 
@@ -790,8 +790,8 @@ fn main() -> ! {
                             // 重力補償は u_eq (SA) に線形分が含まれるため不要
                             let tau_disturbance = dkf_state.disturbance;
 
-                            let tau_l = lq_out.tau_l + tau_disturbance;
-                            let tau_r = lq_out.tau_r + tau_disturbance;
+                            let tau_l = lq_out.tau_l - tau_disturbance;
+                            let tau_r = lq_out.tau_r - tau_disturbance;
 
                             // クーロン摩擦補償
                             let omega_wheel = prev_velocity / WHEEL_RADIUS;
@@ -806,11 +806,11 @@ fn main() -> ! {
 
                             // PWM変換
                             let atom_max = atom_motion::MOTOR_SPEED_MAX as f32;
-                            let m2_out = torque_to_pwm(tau_l_final, omega_wheel, v_batt, atom_max);
-                            let m1_out = -torque_to_pwm(tau_r_final, omega_wheel, v_batt, atom_max);
+                            let m1_out = torque_to_pwm(tau_l_final, omega_wheel, v_batt, atom_max);
+                            let m2_out = -torque_to_pwm(tau_r_final, omega_wheel, v_batt, atom_max);
                             
-                            m1_pwm = m1_out.clamp(-atom_max, atom_max) as i8;
-                            m2_pwm = m2_out.clamp(-atom_max, atom_max) as i8;
+                            m1_pwm = m1_out.clamp(-atom_max, atom_max) as i8 * -1; // FM90かAtomMotionの仕様
+                            m2_pwm = m2_out.clamp(-atom_max, atom_max) as i8 * -1; // FM90かAtomMotionの仕様
 
                             if counter % PRINT_DIV == 0 {
                                 let ps = p_state.clone();
