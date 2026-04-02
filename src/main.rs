@@ -134,17 +134,19 @@ const DT: f32 = 1.0 / FREQUENCY as f32;
 const PITCH_OFFSET: f32 = -0.125;
 
 // ── モーター物理定数 ──
-/// トルク定数 [Nm/V] (FM90 datasheet: 0.01471Nm / 6V)
-const K_TAU: f32 = 0.002452;
-/// 逆起電力定数 [Nm·s/rad] (FM90 datasheet: 0.01471Nm / 13.61rad/s)
-const K_B: f32 = 0.001081;
+/// トルク定数 [Nm/V] (FM90 datasheet: 0.1471Nm / 6V)
+const K_TAU: f32 = 0.02452;
+/// 逆起電力定数 [Nm·s/rad] (FM90 datasheet: 0.1471Nm / 13.61rad/s)
+const K_B: f32 = 0.01081;
 /// ホイール半径 [m]
 const WHEEL_RADIUS: f32 = 0.03;
-/// モーター効率 [-]
+/// モーター効率 [-] (データシート値に出力軸のロスが含まれているため1.0)
 const MOTOR_EFF: f32 = 1.0;
-/// クーロン摩擦トルク [Nm]
-/// 旧deadzone閾値30PWMから逆算: 30/300 × η·k_τ·V_batt ≈ 0.00123 Nm (V_batt≈5V)
-const TAU_COULOMB: f32 = 0.00123;
+
+/// 左モーターのクーロン摩擦トルク [Nm] (PWM閾値35, V_batt=3.8V換算)
+const TAU_COULOMB_L: f32 = 0.02568;
+/// 右モーターのクーロン摩擦トルク [Nm] (PWM閾値30, V_batt=3.8V換算)
+const TAU_COULOMB_R: f32 = 0.02201;
 
 const MOTION_DIV: u32 = 1;
 const DISPLAY_DIV: u32 = 10;
@@ -170,16 +172,16 @@ fn torque_to_pwm(tau_desired: f32, omega_wheel: f32, v_batt: f32, pwm_max: f32) 
 
 /// クーロン摩擦補償トルク [Nm]
 ///
-/// 動いている場合: τ_coulomb · sign(ω_wheel)
-/// 停止時: min(|τ_applied|, τ_static) · sign(τ_applied)
-fn coulomb_friction(omega_wheel: f32, tau_applied: f32) -> f32 {
+/// 動いている場合: tau_coulomb · sign(ω_wheel)
+/// 停止時: min(|tau_applied|, tau_static) · sign(tau_applied)
+fn coulomb_friction(omega_wheel: f32, tau_applied: f32, tau_coulomb: f32) -> f32 {
     const OMEGA_THRESHOLD: f32 = 0.1; // 停止判定閾値 [rad/s]
 
     if fabsf(omega_wheel) > OMEGA_THRESHOLD {
-        copysignf(TAU_COULOMB, omega_wheel)
+        copysignf(tau_coulomb, omega_wheel)
     } else {
         if fabsf(tau_applied) > 1e-4 {
-            copysignf(TAU_COULOMB, tau_applied)
+            copysignf(tau_coulomb, tau_applied)
         } else {
             0.0
         }
@@ -624,15 +626,15 @@ fn main() -> ! {
         b_aug: MODEL_B_AUG,
         // --- ここを調整 ---
         q_diag: [
-            1.0 / (0.3 * 0.3),    // x_pos:    許容 0.3 m
-            1.0 / (0.05 * 0.05),   // θ_pitch:  許容 0.05 rad (~3°)
+            1.0 / (0.5 * 0.5),    // x_pos:    許容 0.3 m
+            1.0 / (0.03 * 0.03),   // θ_pitch:  許容 0.05 rad (~3°)
             1.0 / (0.2 * 0.2),    // ψ_yaw:    許容 0.2 rad (~11°)
             1.0 / (5.0 * 5.0),    // w:        許容 5.0
             1.0 / (5.0 * 5.0),    // ∫e_pos:   許容 1.0 m·s
             1.0 / (1.0 * 1.0),    // ∫e_yaw:   許容 1.0 rad·s
         ],
         r_diag: [
-            1.0 / (0.2 * 0.2),    // v_pos:    許容 0.5 m/s
+            1.0 / (0.3 * 0.3),    // v_pos:    許容 0.5 m/s
             1.0 / (1.0 * 1.0),    // ω_yaw:    許容 3.0 rad/s
         ],
         // --- ここまで ---
@@ -661,9 +663,9 @@ fn main() -> ! {
 
         wheel_radius: WHEEL_RADIUS,
         m_p: 0.1,
-        m_w: 0.023,
+        m_w: 0.023, //2輪分
         i_p: 0.000363,
-        i_w: 0.00001035, //0.5*0.023*0.03^2
+        i_w: 0.00001035, //2輪分 0.5*0.023*0.03^2
         l: 0.035,
         imu_rx: 0.01,
         imu_rz: 0.08,
@@ -748,9 +750,9 @@ fn main() -> ! {
                             // info!("a={}, {}, {}", ax, ay, az);
                             // info!("g={}, {}, {}", gx, gy, gz);
                             // info!("m=({},{},{})", mc, my, mz);
-                            udp_println!(
-                                "{:.3},{:.3}", v, i,
-                            );
+                            // udp_println!(
+                            //     "{:.3},{:.3}", v, i,
+                            // );
                         }
                         counter += 1;
 
@@ -790,32 +792,50 @@ fn main() -> ! {
                             // 重力補償は u_eq (SA) に線形分が含まれるため不要
                             let tau_disturbance = dkf_state.disturbance;
 
-                            let tau_l = lq_out.tau_l - tau_disturbance;
-                            let tau_r = lq_out.tau_r - tau_disturbance;
+                            // ★純粋な要求トルク（摩擦補償前）
+                            let tau_l = lq_out.tau_l - (tau_disturbance / 2.0); // 一輪分に
+                            let tau_r = lq_out.tau_r - (tau_disturbance / 2.0); // 一輪分に
+
+                            // ★EKF・DKFのモデル予測に使うのは、この純粋なトルクの合計
+                            let pure_total_pitch_torque = tau_l + tau_r;
 
                             // クーロン摩擦補償
-                            let omega_wheel = prev_velocity / WHEEL_RADIUS;
-                            let tau_l_final = tau_l + coulomb_friction(omega_wheel, tau_l);
-                            let tau_r_final = tau_r + coulomb_friction(omega_wheel, tau_r);
+                            // 1. 車輪の対地角速度 [rad/s]
+                            let omega_wheel_absolute = prev_velocity / WHEEL_RADIUS;
+                            let omega_motor = omega_wheel_absolute + state.pitch_rate;
+                            let tau_l_final = tau_l + coulomb_friction(omega_motor, tau_l, TAU_COULOMB_L);
+                            let tau_r_final = tau_r + coulomb_friction(omega_motor, tau_r, TAU_COULOMB_R);
 
-                            let total_pitch_torque = tau_l_final + tau_r_final;
-                            prev_total_pitch_torque = total_pitch_torque;
+                            prev_total_pitch_torque = pure_total_pitch_torque;
                             prev_velocity = p_state.velocity;
 
-                            dkf.set_control_torque(total_pitch_torque);
+                            dkf.set_control_torque(pure_total_pitch_torque);
 
                             // PWM変換
                             let atom_max = atom_motion::MOTOR_SPEED_MAX as f32;
-                            let m1_out = torque_to_pwm(tau_l_final, omega_wheel, v_batt, atom_max);
-                            let m2_out = -torque_to_pwm(tau_r_final, omega_wheel, v_batt, atom_max);
+                            // L_motor => ±40.0;
+                            // R_motor => ±35.0;
+                            let m1_out: f32 = torque_to_pwm(tau_l_final, omega_motor, v_batt, atom_max);
+                            let m2_out: f32 = -torque_to_pwm(tau_r_final, omega_motor, v_batt, atom_max);
                             
                             m1_pwm = m1_out.clamp(-atom_max, atom_max) as i8 * -1; // FM90かAtomMotionの仕様
                             m2_pwm = m2_out.clamp(-atom_max, atom_max) as i8 * -1; // FM90かAtomMotionの仕様
 
                             if counter % PRINT_DIV == 0 {
                                 let ps = p_state.clone();
+                                udp_println!(
+                                    "{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},", 
+                                    m1_out, m2_out,
+                                    p_state.position, p_state.velocity,
+                                    now_angle, state.pitch_rate,
+                                );
                                 // udp_println!(
-                                //     "{:.3}", v
+                                //     "tL:{:.4}, tR:{:.4}, Yaw:{:.3}, dYaw:{:.3}",
+                                //     lq_out.tau_l, lq_out.tau_r, state.continuous_yaw, state.yaw_rate
+                                // );
+                                // udp_println!(
+                                //     "tauL:{:.4}, omg:{:.3}, PWM:{:.1}",
+                                //     tau_l, omega_motor, m1_out
                                 // );
                             }
                         } else {
