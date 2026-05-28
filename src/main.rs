@@ -140,13 +140,13 @@ const K_TAU: f32 = 0.02452;
 const K_B: f32 = 0.01081;
 /// ホイール半径 [m]
 const WHEEL_RADIUS: f32 = 0.03;
-/// モーター効率 [-] (データシート値に出力軸のロスが含まれているため1.0)
-const MOTOR_EFF: f32 = 1.0;
+/// モーター効率 [-]
+const MOTOR_EFF: f32 = 0.6;
 
 /// 左モーターのクーロン摩擦トルク [Nm] (PWM閾値35, V_batt=3.8V換算)
-const TAU_COULOMB_L: f32 = 0.02568;
+const TAU_COULOMB_L: f32 = 0.02568 * MOTOR_EFF;
 /// 右モーターのクーロン摩擦トルク [Nm] (PWM閾値30, V_batt=3.8V換算)
-const TAU_COULOMB_R: f32 = 0.02201;
+const TAU_COULOMB_R: f32 = 0.02201 * MOTOR_EFF;
 
 const MOTION_DIV: u32 = 1;
 const DISPLAY_DIV: u32 = 10;
@@ -635,15 +635,15 @@ fn main() -> ! {
         ch: [
             // ch[0]: pitch/position channel
             lq_stsmc::StsmcChannelConfig {
-                lambda: 0.01,
-                alpha: 0.05,
+                lambda: 0.0,
+                alpha: 0.0,
                 epsilon: 0.05,
                 v_limit: 50.0,
             },
             // ch[1]: yaw channel
             lq_stsmc::StsmcChannelConfig {
-                lambda: 0.01,
-                alpha: 0.05,
+                lambda: 0.0,
+                alpha: 0.0,
                 epsilon: 0.05,
                 v_limit: 50.0,
             },
@@ -675,7 +675,8 @@ fn main() -> ! {
         a_max: 50.0,
         v_max: 5.0,
 
-        command_lpf_tau: 0.003183, // 50Hz
+        // command_lpf_tau: 0.003183, // 50Hz
+        command_lpf_tau: 0.03, // モーターやドライバの立ち上がり速度に合わせる必要がある
 
         r_accel: 0.01, //加速度センサの分散の2乗にすればよいらしい
         constraint_r_scale: 2.0,
@@ -804,8 +805,10 @@ fn main() -> ! {
                             // 1. 車輪の対地角速度 [rad/s]
                             let omega_wheel_absolute = prev_velocity / WHEEL_RADIUS;
                             let omega_motor = omega_wheel_absolute + state.pitch_rate;
-                            let tau_l_final = tau_l + coulomb_friction(omega_motor, tau_l, TAU_COULOMB_L);
-                            let tau_r_final = tau_r + coulomb_friction(omega_motor, tau_r, TAU_COULOMB_R);
+                            let colomb_l = coulomb_friction(omega_motor, tau_l, TAU_COULOMB_L);
+                            let colomb_r = coulomb_friction(omega_motor, tau_r, TAU_COULOMB_R);
+                            let tau_l_final = tau_l + colomb_l;
+                            let tau_r_final = tau_r + colomb_r;
 
                             prev_total_pitch_torque = pure_total_pitch_torque;
                             prev_velocity = p_state.velocity;
@@ -814,8 +817,6 @@ fn main() -> ! {
 
                             // PWM変換
                             let atom_max = atom_motion::MOTOR_SPEED_MAX as f32;
-                            // L_motor => ±40.0;
-                            // R_motor => ±35.0;
                             let m1_out: f32 = torque_to_pwm(tau_l_final, omega_motor, v_batt, atom_max);
                             let m2_out: f32 = -torque_to_pwm(tau_r_final, omega_motor, v_batt, atom_max);
                             
@@ -824,18 +825,28 @@ fn main() -> ! {
 
                             if counter % PRINT_DIV == 0 {
                                 let ps = p_state.clone();
-                                // udp_println!(
-                                //     "{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},", 
-                                //     m1_out, m2_out,
-                                //     p_state.position, p_state.velocity,
-                                //     now_angle, state.pitch_rate,
-                                // );
                                 udp_println!(
-                                    "{:.4},{:.4},{:.4}",
-                                    prev_velocity,       // pos_ekfが何を推定しているか
-                                    omega_motor,         // 実際に使われている値
-                                    m1_out,
+                                    "{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},",
+                                    p_state.position, p_state.velocity,
+                                    p_state.a_target, p_state.a_meas,
+                                    pure_total_pitch_torque, smd_angular_accel,
+                                    now_angle, state.pitch_rate,
+                                    colomb_l, colomb_r,
+                                    m1_out, m2_out, 
                                 );
+                                // 2. 制御測系の整合性
+                                // udp_println!(
+                                //     "{:.4},{:.4},{:.4}",
+                                //     prev_velocity,       // pos_ekfが何を推定しているか
+                                //     omega_motor,         // 実際に使われている値
+                                //     m1_out,
+                                // );
+                                // 1. 状態推定系の整合性
+                                // udp_println!(
+                                //     "{:.4},{:.4}",
+                                //     now_angle,
+                                //     state.pitch_rate
+                                // );
                             }
                         } else {
                             m1_pwm = 0;
